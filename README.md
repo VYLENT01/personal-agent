@@ -1,6 +1,6 @@
 # Personal Agent — دستیار هوش مصنوعی شخصی و محلی برای Windows
 
-**Local-First Personal AI Agent** — نسخه 0.2.0 (فاز ۲: Tool Calling)
+**Local-First Personal AI Agent** — نسخه 0.3.0 (فاز ۳: Windows Integration)
 
 چت‌بات محلی نیست؛ ایجنت واقعی است که مرحله‌به‌مرحله قابلیت تعامل کنترل‌شده با ویندوز را کسب می‌کند. همه هوش مصنوعی روی مدل‌های محلی Ollama اجرا می‌شود — بدون هیچ API پولی.
 
@@ -8,6 +8,10 @@
 
 - 💬 **گفت‌وگوی فارسی/انگلیسی** با استریم پاسخ توکن‌به‌توکن و تفکر مدل جدا از پاسخ (Qwen3)
 - 🔧 **Tool Calling واقعی**: مدل خودش ابزار را انتخاب و پارامتر تولید می‌کند؛ نتیجه اجرا به مدل برمی‌گردد و پاسخ نهایی بر پایه داده واقعی ساخته می‌شود
+- 🪟 **Windows Integration (فاز ۳)**: ۲۵ ابزار در ۵ گروه — سیستم، فایل‌سیستم (۱۰)، ترمینال (۲ با CommandPolicy)، برنامه‌ها (۴) و توسعه (۶)
+- 🛡 **سطوح دسترسی عملیاتی**: L1 خودکار؛ L2 (نوشتن/اجرا/فرمان) فقط با تأیید کاربرِ دقیقِ همان عملیات؛ L3 غیرفعال
+- 🗺 **مسیرهای مجاز قابل‌تنظیم** (allowed_paths) با ضد Path Traversal دو-لایه و رد symlink فرار
+- ⌨️ **ترمینال امن**: allowlist ساختارمند؛ زنجیره/تزریق/اسکریپت/مدیریتی رد؛ timeout + لغو + سقف خروجی
   - مسیر **بومی** (پارامتر `tools` + `message.tool_calls` در API رسمی Ollama) — تشخیص خودکار قابلیت از `/api/show`
   - مسیر **fallback** با پروتکل JSON برای مدل‌های بدون قابلیت (مثل gemma3)
 - 🛠 **۳ ابزار فقط-خواندنی** با اعتبارسنجی Pydantic: `system.get_system_info` / `system.get_memory_usage` / `system.get_disk_usage`
@@ -33,7 +37,7 @@ cd personal-agent
 
 اجرای دستی: `python -m app.main` از ریشه پروژه.
 
-تست‌ها: `python -m pytest tests -q` — بدون نیاز به Ollama واقعی (سرور mock)؛ **۱۲۸ تست سبز**.
+تست‌ها: `python -m pytest tests -q` — بدون نیاز به Ollama واقعی (mock)؛ **۲۷۷ تست سبز** (+۲ skip عمدی integration).
 
 تست integration با Ollama واقعی (اختیاری):
 
@@ -56,6 +60,7 @@ python -m pytest tests/test_integration_ollama.py -v
 |---|---|---|
 | ۱ | هسته AI محلی + UI کامل | ✅ |
 | ۲ | Tool Calling (Registry + Schema + چرخه کامل) | ✅ |
+| ۳ | Windows Integration (فایل‌سیستم/ترمینال/برنامه/توسعه + امنیت) | ✅ |
 | ۳ | Windows Integration (فایل/سیستم/ترمینال/برنامه) | ⏭ |
 | ۴ | Memory (SQLite + Qdrant اختیاری) + Planning | ⏭ |
 | ۵ | Security (Approval + Audit + Sandbox) | ⏭ |
@@ -67,10 +72,10 @@ python -m pytest tests/test_integration_ollama.py -v
 
 ```
 personal-agent/
-├── app/            # main, bootstrap, ui/, agent/, llm/, config/, tools/
+├── app/            # main, bootstrap, ui/, agent/, llm/, config/, tools/, security/
 ├── data/           # config/ database/ memory/ conversations/ cache/
 ├── logs/           # agent.log چرخشی
-├── tests/          # ۱۲۸ تست (pytest) + سرور mock Ollama + integration
+├── tests/          # ۲۷۷ تست (pytest) + mock + integration چرخه کامل
 ├── scripts/        # setup.ps1 / run.ps1 / check_environment.py
 └── docs/           # معماری، نصب، ابزارها، توسعه
 ```
@@ -79,4 +84,6 @@ personal-agent/
 
 - هیچ داده‌ای از ماشین شما خارج نمی‌شود؛ استنتاج کاملاً محلی است.
 - `.env` در `.gitignore`؛ هیچ کلید/توکنی در سورس نیست.
-- سطوح دسترسی L1/L2/L3 (خواندن/نوشتن/حساس): فاز ۲ فقط ابزارهای L1 دارد و Registry ابزارهای L2/L3 را نه ثبت و نه اجرا می‌کند؛ اجرای کنترل‌شده آن‌ها در فاز ۵ (Approval) کامل می‌شود.
+- سطوح دسترسی L1/L2/L3: فاز ۳ — L1 خودکار؛ L2 با ApprovalToken یک‌بارمصرفِ گره‌خورده به نام+پارامترِ همان عملیات (تغییر پارامتر = بی‌اعتبار)؛ L3 در این فاز اصلاً اجرا نمی‌شود و از دید مدل پنهان است.
+- ترمینال فقط فرمان‌های allowlist (قابل توسعه از defaults) را ساختارمند (argv جدا، بدون shell) اجرا می‌کند؛ تزریق/زنجیره/مدیریتی همیشه رد.
+- مسیرهای مجاز در `data/config/settings.json` (کلید `allowed_paths`) یا env `PERSONAL_AGENT_ALLOWED_PATHS` (جداکننده |) تنظیم می‌شوند.

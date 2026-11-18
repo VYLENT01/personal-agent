@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Iterator, Optional, Sequence, Union
@@ -103,6 +104,44 @@ class ToolCallRequested:
 
 
 @dataclass
+class ApprovalRequested:
+    """درخواست تأیید کاربر برای عملیات L2 (بخش ۸ فاز ۳).
+
+    UI پس از نمایش دیالوگ، یکی از resolve_approve/resolve_deny را صدا می‌زند
+    (thread-safe). orchestrator منتظرِ قابل‌قطع (لغو نوبت/انقضا) می‌ماند.
+    """
+
+    tool_name: str
+    args: dict[str, Any]
+    index: int
+    # پرشدن توسط UI: (تصمیم کاربر، توکن تأیید در صورت قبول)
+    _decision: Optional[bool] = None          # None=در انتظار | True=تأیید | False=رد
+    _approval: Optional["ApprovalToken"] = None
+    _event: Any = None                          # threading.Event (سازنده می‌سازد)
+
+    def resolve_approve(self, approval: "ApprovalToken") -> None:
+        """کاربر عملیات را تأیید کرد؛ توکن متناسب پیوست می‌شود."""
+        self._approval = approval
+        self._decision = True
+        if self._event is not None:
+            self._event.set()
+
+    def resolve_deny(self) -> None:
+        """کاربر عملیات را رد کرد."""
+        self._decision = False
+        if self._event is not None:
+            self._event.set()
+
+    @property
+    def decision(self) -> Optional[bool]:
+        return self._decision
+
+    @property
+    def approval(self) -> Optional["ApprovalToken"]:
+        return self._approval
+
+
+@dataclass
 class ToolCallStarted:
     """اجرای ابزار آغاز شد (پارامترها معتبر و مجاز)."""
 
@@ -153,6 +192,7 @@ AgentEvent = Union[
     ThinkingDelta,
     ContentDelta,
     ToolCallRequested,
+    ApprovalRequested,
     ToolCallStarted,
     ToolCallFinished,
     TurnCompleted,
@@ -345,28 +385,40 @@ class ChatOrchestrator:
                     )
                 else:
                     assert tool is not None
+                    # --- گیت تأیید کاربر برای L2 (بخش ۸ فاز ۳) ---
+                    approval = None
+                    if registry.needs_approval(call.name):
+                        approval = yield from self._request_approval(
+                            call.name, call.args, index, token
+                        )
+                        if approval is None:
+                            # رد/انقضا/لغو → نتیجه ساختاریافته رد به مدل
+                            result = ToolResult.fail(
+                                call.name,
+                                "عملیات به‌دستور شما رد شد یا مهلت تأیید تمام شد.",
+                            )
+                            yield ToolCallFinished(
+                                result=result, args=call.args, index=index
+                            )
+                            turn_tool_calls += 1
+                            result_text = result.truncate_for_llm()
+                            self._record_tool_result(
+                                call, result_text, tool_mode, pending_result_messages
+                            )
+                            continue
+
                     yield ToolCallStarted(name=call.name, args=call.args, index=index)
-                    # --- ۷/۸. اجرا با timeout داخلی Registry ---
-                    result = registry.execute_tool(call.name, call.args)
+                    # --- ۷/۸. اجرا با timeout داخلی Registry + تأیید ---
+                    result = registry.execute_tool(
+                        call.name, call.args, approval=approval
+                    )
 
                 yield ToolCallFinished(result=result, args=call.args, index=index)
                 turn_tool_calls += 1
 
                 # --- ۹. آماده‌سازی نتیجه برای مدل (تکرار بعد) + ثبت در تاریخچه ---
                 result_text = result.truncate_for_llm()
-                if tool_mode == "native":
-                    # ثبت در state با نقش tool (تاریخچه کامل مکالمه)
-                    state_message = self.state.append_tool_result(
-                        call.name, result_text, tool_call_id=call.id
-                    )
-                    # پیام ارسالی به مدل همان فریم state است (ارجاع مشترک امن:
-                    # meta فقط خوانده می‌شود)
-                    pending_result_messages.append(state_message)
-                else:
-                    self.state.append_tool_result(call.name, result_text)
-                    pending_result_messages.append(
-                        _fallback_pending(call.name, result_text)
-                    )
+                self._record_tool_result(call, result_text, tool_mode, pending_result_messages)
 
             # حلقه ادامه می‌یابد: مدل نتیجه را می‌بیند و پاسخ نهایی می‌سازد
             if iteration >= self.iterations_limit:
@@ -385,9 +437,63 @@ class ChatOrchestrator:
         yield TurnFailed(error="حلقه ایجنت به پایان غیرمنتظره رسید.", kind="InternalError")
 
     # ------------------------------------------------------------------
-    # زیر-چرخه: یک فراخوانی استریم LLM
+    # تأیید کاربر برای عملیات L2 (بخش ۸ فاز ۳)
     # ------------------------------------------------------------------
 
+    def _request_approval(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        index: int,
+        token: "CancelToken",
+    ) -> Iterator[AgentEvent]:
+        """رویداد ApprovalRequested + انتظار قابل‌قطع تا تصمیم/انقضا/لغو.
+
+        خروجی: ApprovalToken در صورت تأیید؛ None در صورت رد/انقضا/لغو.
+        توکن فقط از پاسخ کاربر (UI) می‌آید — مدل هرگز آن نمی‌سازد.
+        """
+        import threading as _threading
+
+        from app.config import defaults as _d
+        from app.security.permissions import ApprovalToken, PermissionManager
+
+        request = ApprovalRequested(tool_name=tool_name, args=args, index=index)
+        request._event = _threading.Event()  # noqa: SLF001 - سیم‌کشی داخلی رویداد
+        yield request
+
+        timeout = getattr(self.settings, "approval_timeout", None) or _d.APPROVAL_TIMEOUT_SECONDS
+        deadline = time.monotonic() + min(float(timeout), _d.APPROVAL_TIMEOUT_SECONDS)
+        while not request._event.wait(timeout=0.1):  # noqa: SLF001 - انتظار قابل‌قطع
+            if token.is_cancelled():
+                logger.info("نوبت حین انتظار تأیید لغو شد (%s)", tool_name)
+                return
+            if time.monotonic() >= deadline:
+                logger.info("مهلت تأیید %s تمام شد", tool_name)
+                return
+        if request.decision is True and request.approval is not None:
+            return request.approval
+        return None
+
+    def _record_tool_result(
+        self,
+        call: ToolCall,
+        result_text: str,
+        tool_mode: str,
+        pending_result_messages: list[ChatMessage],
+    ) -> None:
+        """ثبت نتیجه ابزار در تاریخچه + آماده‌سازی پیام تکرار بعد (هر دو مسیر)."""
+        if tool_mode == "native":
+            state_message = self.state.append_tool_result(
+                call.name, result_text, tool_call_id=call.id
+            )
+            pending_result_messages.append(state_message)
+        else:
+            self.state.append_tool_result(call.name, result_text)
+            pending_result_messages.append(_fallback_pending(call.name, result_text))
+
+    # ------------------------------------------------------------------
+    # زیر-چرخه: یک فراخوانی استریم LLM
+    # ------------------------------------------------------------------
     def _stream_llm_call(
         self,
         messages: Sequence[ChatMessage],

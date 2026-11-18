@@ -7,7 +7,7 @@ from __future__ import annotations
 
 APP_NAME = "Personal Agent"
 APP_NAME_FA = "دستیار هوشمند شخصی"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 ORG_NAME = "PersonalAgent"
 
 # --- Ollama / LLM ---
@@ -61,10 +61,60 @@ MAX_TOOLS_IN_PROMPT = 24
 # حداقل اندازه تفکیک برای اعتبار پاسخ JSON در مسیر fallback
 FALLBACK_MIN_JSON_LEN = 6
 
-# --- Permission levels (فاز ۲؛ اجرای L2/L3 در فاز ۵ کامل می‌شود) ---
+# --- Permission levels (فاز ۲؛ فاز ۳: L2 با تأیید کاربر اجرا می‌شود) ---
 PERMISSION_L1 = 1  # فقط-خواندنی: اجرای خودکار
-PERMISSION_L2 = 2  # نوشتن/تغییر: در این فاز ابزاری ثبت نمی‌شود
-PERMISSION_L3 = 3  # حساس/حذف/ترمینال: در این فاز ابزاری ثبت نمی‌شود
+PERMISSION_L2 = 2  # نوشتن/اجرا/فرمان: فقط با ApprovalToken (بخش ۸ فاز ۳)
+PERMISSION_L3 = 3  # حذف/Registry/مدیریتی: غیرفعال در این فاز
+
+# --- Windows Integration (فاز ۳) ---
+# مسیرهای مجاز پیش‌فرض (فقط-خواندنی برای ابزارها) — در Settings قابل تنظیم.
+DEFAULT_ALLOWED_PATHS = [
+    "~/Desktop",
+    "~/Documents",
+    "~/Downloads",
+    "~/projects",
+]
+# سقف تأیید کاربر برای عملیات L2 (ثانیه) — پس از آن درخواست رد می‌شود
+APPROVAL_TIMEOUT_SECONDS = 120.0
+# سقف عمق درخت پوشه برای filesystem.get_directory_tree
+MAX_TREE_DEPTH = 3
+# سقف تعداد فایل/پوشه در هر فهرست/جست‌وجو
+MAX_LIST_ENTRIES = 200
+# سقف حجم خواندن فایل (بایت) — فایل بزرگ‌تر رد یا برش می‌خورد
+MAX_READ_BYTES = 512 * 1024
+# سقف طول متن بازگردانده‌شده از read/search (کاراکتر)
+MAX_TEXT_RESULT_CHARS = 8000
+# سقف تعداد نتایج جست‌وجوی متن
+MAX_SEARCH_RESULTS = 50
+# زمان اجرای فرمان ترمینال (ثانیه)
+TERMINAL_TIMEOUT_SECONDS = 30.0
+# سقف حجم stdout/stderr هر فرمان (کاراکتر)
+TERMINAL_OUTPUT_MAX_CHARS = 8000
+# زمان اجرای تست پروژه (ثانیه)
+DEV_TEST_TIMEOUT_SECONDS = 120.0
+# سقف تعداد برنامه‌های فهرست‌شده
+MAX_APPS_LISTED = 200
+# نام فرمان‌های اجرایی مجاز terminal — سیاست با ساختار (بخش ۶ مشخصات)
+# هر ورودی: (برنامه، آرگومان‌های مجاز به‌عنوان الگو؛ "*"" یعنی هر آرگومان امن)
+# دستورات زنجیره‌ای/اسکریپت/مدیریتی در CommandPolicy رد می‌شوند.
+TERMINAL_ALLOWED_COMMANDS = [
+    {"program": "Get-Location", "shell": "powershell", "args": []},
+    {"program": "Get-Date", "shell": "powershell", "args": []},
+    {"program": "Get-ChildItem", "shell": "powershell", "args": ["*"]},
+    {"program": "Get-ComputerInfo", "shell": "powershell", "args": ["*"]},
+    {"program": "python", "shell": "any", "args": ["--version"]},
+    {"program": "pip", "shell": "any", "args": ["--version"]},
+    {"program": "git", "shell": "any", "args": ["--version", "status"]},
+]
+# الگوی کاراکترهای ممنوع در ورودی ترمینال (ضد Command Injection / زنجیره)
+TERMINAL_FORBIDDEN_CHARS = (";", "|", "&", "`", "\n", "\r", ">", "<", "$(")
+# پسوندهای مسیر برنامه قابل اجرا (applications) — فقط این‌ها اجرا می‌شوند
+APP_EXECUTABLE_EXTENSIONS = (".exe",)
+# نام‌های فرآیند سیستمی ممنوع برای applications.close/launch (گارد مضاعف)
+APP_FORBIDDEN_TARGETS = (
+    "winlogon", "csrss", "services", "lsass", "smss", "wininit",
+    "explorer", "svchost", "system",
+)
 
 # --- مقادیر مجاز ---
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -76,6 +126,7 @@ ENV_KEY_OLLAMA_URL = ENV_PREFIX + "OLLAMA_URL"
 ENV_KEY_MODEL = ENV_PREFIX + "MODEL"
 ENV_KEY_LANGUAGE = ENV_PREFIX + "LANGUAGE"
 ENV_KEY_LOG_LEVEL = ENV_PREFIX + "LOG_LEVEL"
+ENV_KEY_ALLOWED_PATHS = ENV_PREFIX + "ALLOWED_PATHS"  # جداکننده «|» مثال: ~/Documents|~/projects
 
 # --- متغیرهای محیطی تست Integration واقعی ---
 # اگر ست شده باشد، تست‌های integration واقعی Ollama اجرا می‌شوند:

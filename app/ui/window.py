@@ -49,6 +49,13 @@ QFrame#bubbleTool { background-color: #20303a; border: 1px solid #2d5661; border
 QLabel#toolName { color: #7fd4c4; font-size: 13px; font-weight: 600; }
 QLabel#toolArgs { color: #8f9aab; font-size: 12px; }
 QLabel#toolResult { color: #c7d6e8; font-size: 12px; }
+QDialog#approvalDialog { background-color: #262c36; }
+QLabel#approvalTitle { color: #ffb86b; font-size: 15px; font-weight: 600; }
+QLabel#approvalArgs { color: #c7d6e8; font-family: 'Courier New', monospace; font-size: 12px; background-color: #1f242c; border-radius: 6px; padding: 8px; }
+QPushButton#approveButton { background-color: #2f7d4f; color: white; border: none; border-radius: 8px; padding: 9px 18px; font-weight: 600; }
+QPushButton#approveButton:hover { background-color: #37955c; }
+QPushButton#denyButton { background-color: #7f2b2b; color: white; border: none; border-radius: 8px; padding: 9px 18px; font-weight: 600; }
+QPushButton#denyButton:hover { background-color: #963434; }
 QLabel#thinkingText { color: #8f9aab; font-style: italic; font-size: 12px; }
 QLabel#bubbleMeta { color: #6d7889; font-size: 11px; }
 QLabel#chatStatus { color: #8f9aab; font-size: 12px; }

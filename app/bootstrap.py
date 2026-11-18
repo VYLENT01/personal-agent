@@ -18,7 +18,13 @@ from app.config.settings import Settings
 from app.llm.base import BaseLLMClient
 from app.llm.model_manager import ModelManager
 from app.llm.ollama_client import OllamaClient
+from app.security.paths import PathGuard, build_path_guard
+from app.security.permissions import PermissionManager
+from app.tools.applications import create_application_tools
+from app.tools.development import create_development_tools
+from app.tools.filesystem import create_filesystem_tools
 from app.tools.registry import ToolRegistry, build_default_registry
+from app.tools.terminal import CommandPolicy, build_command_policy, create_terminal_tools
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,9 @@ class AppContext:
     model_manager: ModelManager
     orchestrator: ChatOrchestrator
     tool_registry: ToolRegistry
+    # فاز ۳
+    path_guard: PathGuard
+    permission_manager: PermissionManager
 
     def apply_settings(self, new_settings: Settings) -> None:
         """اعمال تنظیمات جدید در زمان اجرا + ذخیره + بازسازی اجزای وابسته."""
@@ -165,6 +174,18 @@ def build_app_context(
     )
     model_manager = ModelManager(provider, settings)
     tool_registry = tool_registry or build_default_registry()
+    # --- فاز ۳: امنیت مسیر + مدیر تأیید ---
+    path_guard = build_path_guard(settings)
+    permission_manager = PermissionManager()
+    # --- فاز ۳: چهار گروه ابزار جدید (filesystem/terminal/applications/development) ---
+    for tool in create_filesystem_tools(path_guard):
+        tool_registry.register_tool(tool)
+    for tool in create_terminal_tools(build_command_policy(), path_guard):
+        tool_registry.register_tool(tool)
+    for tool in create_application_tools():
+        tool_registry.register_tool(tool)
+    for tool in create_development_tools(path_guard):
+        tool_registry.register_tool(tool)
     orchestrator = ChatOrchestrator(provider, model_manager, settings, tool_registry)
 
     context = AppContext(
@@ -177,6 +198,8 @@ def build_app_context(
         model_manager=model_manager,
         orchestrator=orchestrator,
         tool_registry=tool_registry,
+        path_guard=path_guard,
+        permission_manager=permission_manager,
     )
     logger.info(
         "برنامه راه‌اندازی شد (نسخه %s) — Ollama: %s | مدل فعال: %s | ابزارها: %s",

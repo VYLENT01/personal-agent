@@ -350,3 +350,110 @@ class TestSystemTools:
         assert "[بریده شد]" in text
         fail = ToolResult.fail("x.y", "خطای تست")
         assert "error=خطای تست" in fail.truncate_for_llm()
+
+
+# ===========================================================================
+# فاز ۳ — گیت تأیید L2 در Registry (بخش ۸)
+# ===========================================================================
+
+from app.security.permissions import ApprovalError, PermissionManager  # noqa: E402
+from app.tools.base import PermissionLevel as PL  # noqa: E402
+
+
+class _L2EchoTool(_EchoTool):
+    """ابزار L2 (نوشتن) — بدون تأیید اجرا نمی‌شود."""
+
+    permission_level = PL.L2_WRITE
+
+    @property
+    def name(self) -> str:
+        return "test.write_echo"
+
+
+class TestL2ApprovalGate:
+    def _registry_with_l2(self) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register_tool(_EchoTool())
+        registry.register_tool(_L2EchoTool())
+        return registry
+
+    def test_l2_needs_approval(self) -> None:
+        registry = self._registry_with_l2()
+        assert registry.needs_approval("test.write_echo") is True
+        assert registry.needs_approval("test.echo") is False
+        assert registry.needs_approval("test.nobody") is False
+
+    def test_l2_rejected_without_approval(self) -> None:
+        registry = self._registry_with_l2()
+        result = registry.execute_tool("test.write_echo", {"text": "x"})
+        assert result.success is False
+        assert "تأیید کاربر" in (result.error or "")
+        assert registry.stats()["rejected"] == 1
+
+    def test_l2_executes_with_valid_approval(self) -> None:
+        registry = self._registry_with_l2()
+        args = {"text": "ها", "times": 2}
+        token = PermissionManager().create_token("test.write_echo", args)
+        result = registry.execute_tool("test.write_echo", args, approval=token)
+        assert result.success is True
+        assert result.data == {"echo": "هاها"}
+
+    def test_l2_token_single_use(self) -> None:
+        registry = self._registry_with_l2()
+        args = {"text": "x"}
+        token = PermissionManager().create_token("test.write_echo", args)
+        first = registry.execute_tool("test.write_echo", args, approval=token)
+        second = registry.execute_tool("test.write_echo", args, approval=token)
+        assert first.success is True
+        assert second.success is False
+        assert "استفاده شده" in (second.error or "")
+
+    def test_l2_token_invalid_on_changed_args(self) -> None:
+        registry = self._registry_with_l2()
+        token = PermissionManager().create_token(
+            "test.write_echo", {"text": "x"}
+        )
+        result = registry.execute_tool(
+            "test.write_echo", {"text": "OTHER"}, approval=token
+        )
+        assert result.success is False
+        assert "تغییر کرده" in (result.error or "")
+
+    def test_l1_still_runs_without_approval(self) -> None:
+        registry = self._registry_with_l2()
+        result = registry.execute_tool("test.echo", {"text": "x"})
+        assert result.success is True
+
+    def test_l3_still_hard_denied_and_hidden(self) -> None:
+        registry = self._registry_with_l2()
+        registry.register_tool(_SensitiveTool())
+        result = registry.execute_tool("test.sensitive", {"text": "x"})
+        assert result.success is False
+        assert "مجاز نیست" in (result.error or "")
+        names = [s["function"]["name"] for s in registry.get_tool_schemas()]
+        assert "test.sensitive" not in names
+        # L2 در فریم مدل دیده می‌شود (انتخاب با مدل) ولی اجرایش گیت دارد
+        assert "test.write_echo" in names
+
+    def test_registry_default_max_permission_is_l2(self) -> None:
+        registry = ToolRegistry()
+        assert registry._max_permission == PL.L2_WRITE  # noqa: SLF001 - تست مستقیم سیاست
+
+    def test_registry_l3_only_mode_hides_l2(self) -> None:
+        registry = ToolRegistry(max_permission=PermissionLevel.L1_READ_ONLY)
+        registry.register_tool(_L2EchoTool())
+        result = registry.execute_tool("test.write_echo", {"text": "x"})
+        assert result.success is False
+        names = [s["function"]["name"] for s in registry.get_tool_schemas()]
+        assert "test.write_echo" not in names
+
+    def test_expired_token_rejected(self) -> None:
+        registry = self._registry_with_l2()
+        manager = PermissionManager(approval_ttl=0.01)
+        token = manager.create_token("test.write_echo", {"text": "x"})
+        time.sleep(0.05)
+        result = registry.execute_tool(
+            "test.write_echo", {"text": "x"}, approval=token
+        )
+        assert result.success is False
+        assert "منقضی" in (result.error or "")

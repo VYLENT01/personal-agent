@@ -11,7 +11,8 @@
 ## ۲. اجرای تست‌ها
 
 ```bash
-python -m pytest tests -q           # کل مجموعه (سرور mock Ollama خودکار) → ۱۲۸ passed
+python -m pytest tests -q --ignore=tests/test_ui.py   # هسته (سرور mock) → ۲۶۸ passed
+QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # UI جدا (جلوگیری از تداخل شناخته‌شده PySide6+subprocess در یک process)
 python -m pytest tests/test_tools.py -q
 QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # تست UI بدون نمایشگر
 
@@ -25,7 +26,13 @@ PERSONAL_AGENT_INTEGRATION_MODEL=qwen3:8b python -m pytest tests/test_integratio
 
 | فایل | پوشش |
 |---|---|
-| `test_tools.py` | قرارداد Tool/Pydantic، Registry (ثبت/تکراری/رد ناشناخته/غیرفعال/L3)، timeout واقعی، سه ابزار psutil |
+| `test_tools.py` | قرارداد Tool/Pydantic، Registry (ثبت/تکراری/رد ناشناخته/غیرفعال/L3)، timeout واقعی، **گیت L2/ApprovalToken**، سه ابزار psutil |
+| `test_permissions.py` | PathGuard (traversal/symlink/خارج از محدوده/env) + ApprovalToken (یک‌بارمصرف/تغییر پارامتر/انقضا) |
+| `test_filesystem_tools.py` | ۱۰ ابزار filesystem: فهرست/خواندن/بزرگ/باینری/تراوِرسال/ایجاد/ویرایش/رد بدون تأیید/PermissionDenied/اتمیک |
+| `test_terminal_tools.py` | CommandPolicy (تزریق/زنجیره/allowlist توسعه‌پذیر) + timeout/لغو/سقف خروجی واقعی + python --version واقعی |
+| `test_app_apps.py` → `test_app_tools.py` | کشف/جست‌وجو/اجرا معتبر/رد ناشناخته/تأیید/PID واقعی/فرآیند سیستمی پنهان |
+| `test_development_tools.py` | ۶ ابزار توسعه: بازرسی/ساختار/خواندن/pytest موفق-ناموفق-timeout واقعی/git status واقعی |
+| `test_phase3_integration.py` | چرخه کامل: مدل→Registry→نتیجه→LLM→پاسخ نهایی؛ تأیید/رد/انقضا/لغوی UI؛ L3 رد؛ حفظ فاز ۲ |
 | `test_llm.py` | پروتکل Ollama (mock: استریم NDJSON/timeout/خطا/لغو)، **native tools + /api/show capabilities**، ModelManager، parser |
 | `test_agent.py` | حلقه کامل Agent: **چرخه native و fallback**، ارسال نتیجه به مدل، سقف‌ها/حلقه بی‌نهایت، لغو حین ابزار، پیام‌های state |
 | `test_config.py` | Settings: پیش‌فرض/env/sanitize/ذخیره اتمیک + .env |
@@ -53,7 +60,8 @@ PERSONAL_AGENT_INTEGRATION_MODEL=qwen3:8b python -m pytest tests/test_integratio
 | فاز | خروجی | وضعیت |
 |---|---|---|
 | ۱ — Local AI Core | چت‌بات محلی: Ollama، استریم، thinking جدا، لغو، مدیریت خطا، UI کامل | ✅ کامل |
-| ۲ — Tool Calling | Registry، Pydantic schema، چرخه ۱۰مرحله‌ای، native+fallback، UI ابزار | ✅ کامل (۱۲۸ تست سبز) |
+| ۲ — Tool Calling | Registry، Pydantic schema، چرخه ۱۰مرحله‌ای، native+fallback، UI ابزار | ✅ کامل |
+| ۳ — Windows Integration | ۲۵ ابزار ۵ گروه + PathGuard + ApprovalToken + CommandPolicy + ApprovalDialog | ✅ کامل (۲۷۷ تست سبز؛ ویندوز-تست‌های دستی مستند) |
 | ۳ — Windows Integration | filesystem/system/terminal/applications/development | ⏭ بعدی |
 | ۴ — Memory & Planning | SQLite + Qdrant اختیاری، Planner/Executor | ⏭ |
 | ۵ — Security & Autonomy | Permission/Approval/Audit/Sandbox | ⏭ |
@@ -76,3 +84,12 @@ PERSONAL_AGENT_INTEGRATION_MODEL=qwen3:8b python -m pytest tests/test_integratio
 **تست‌ها**: ۱۲۸ passed + ۲ skipped (integration عمدی تا تنظیم env) + smoke بوت با ۳ ابزار ثبت‌شده (exit 0).
 
 **باگ‌های یافت‌و‌رفع‌شده حین توسعه**: (۱) `ThreadPoolExecutor` با context-manager تا اتمام thread بلاک می‌شد → timeout بی‌اثار؛ (۲) لغو فقط socket مدل را می‌بست، اجرای ابزار ادامه می‌یافت → توکن مشترک Registry؛ (۳) باگ باقی‌مانده فاز ۱: پیام کاربر دوبار به مدل می‌رفت (پنجره Context + append جداگانه).
+
+
+## ۹. گزارش فاز ۳ — Windows Integration (خلاصه)
+
+**فایل‌های جدید**: `app/tools/{filesystem,terminal,applications,development}.py`، `app/security/{__init__,paths,permissions}.py`، تست‌های `test_permissions/test_filesystem_tools/test_terminal_tools/test_app_tools/test_development_tools/test_phase3_integration.py`.
+
+**تغییرات**: defaults (v0.3.0 + سقف‌ها/allowlist)، settings (`allowed_paths` + env)، registry (سقف L2 + گیت ApprovalToken + needs_approval)، orchestrator (رویداد ApprovalRequested + انتظار قابل‌قطع + timeout تأیید)، bootstrap (PathGuard/PermissionManager + ثبت ۲۲ ابزار جدید)، UI chat (ApprovalDialog + وضعیت انتظار تأیید + قالب)، window (QSS دیالوگ).
+
+**وضعیت تست**: ۲۷۷ passed + ۲ skipped (integration Ollama واقعی) + smoke بوت ۲۵ ابزار (exit 0). ویندوز-تست‌های دستی: کشف رجیستری واقعی، cmdletهای PowerShell، pywin32 میانبرها — در گزارش فاز ۳ مستند شده‌اند.

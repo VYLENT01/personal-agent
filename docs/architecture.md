@@ -1,6 +1,6 @@
 # معماری نرم‌افزار — Personal Agent
 
-نسخه سند: 1.1 (هم‌راستا با فاز ۲ — Tool Calling؛ بخش‌های ۱–۷ فاز ۱ همچنان معتبرند)
+نسخه سند: 1.2 (هم‌راستا با فاز ۳ — Windows Integration؛ بخش‌های قبلی همچنان معتبرند)
 
 ## ۱. هدف معماری
 
@@ -95,12 +95,13 @@ User Request
 | مسیر | فاز | وضعیت |
 |---|---|---|
 | `app/main.py, bootstrap.py, ui/*, llm/*, config/*, agent/{orchestrator,state,prompts}` | ۱ | ✅ پیاده و تست‌شده |
-| `app/tools/{base,registry,system_tools}.py` + حلقه Tool Calling در orchestrator + UI ابزار | ۲ | ✅ پیاده و تست‌شده (۱۲۸ تست) |
-| `app/tools/{filesystem,terminal,applications,development,browser}.py` | ۳ | برنامه‌ریزی‌شده |
+| `app/tools/{base,registry,system_tools}.py` + حلقه Tool Calling در orchestrator + UI ابزار | ۲ | ✅ پیاده و تست‌شده |
+| `app/tools/{filesystem,terminal,applications,development}.py` + `app/security/{paths,permissions}.py` + گیت L2 در Registry/orchestrator + ApprovalDialog UI | ۳ | ✅ پیاده و تست‌شده (۲۷۷ تست) |
+| `app/tools/browser.py` | ۳+ | برنامه‌ریزی‌شده |
 | `app/memory/*`, `agent/{planner,executor,task_manager}` | ۴ | برنامه‌ریزی‌شده |
 | `app/security/*`, `ui/{tool_activity,approval_dialog}` | ۵ | برنامه‌ریزی‌شده |
 
-فایل‌های فازهای ۳–۵ عمداً **ایجاد نشده‌اند** (نه پوشه خالی، نه فایل stub) تا «کد واقعی یا هیچ» رعایت شود.
+فایل‌های فازهای ۴–۵ عمداً **ایجاد نشده‌اند** (نه پوشه خالی، نه فایل stub) تا «کد واقعی یا هیچ» رعایت شود. `app/security/` طبق گزارش فاز ۳ از فاز ۵ جلو کشیده شد (حداقل PathGuard + ApprovalToken).
 
 ## ۸. تصمیم‌های کلیدی طراحی
 
@@ -115,3 +116,13 @@ User Request
    - تصمیم مسیر در `_resolve_tool_mode`؛ Agent Core به هیچ فرمت اختصاصی مدل وابسته نیست (قرارداد `BaseLLMClient`/`ToolCall` neutral).
 7. **لغو در سه لایه (فاز ۲)**: توکن CancelToken مشترک بین LLM و Registry؛ `cancel_active` برای socket؛ حلقه انتظارِ قابل‌قطع در `_run_with_timeout` — لغو حین اجرای ابزار در <۰.۱s.
 8. **اجرای ابزار با timeout واقعی**: `ThreadPoolExecutor` بدون context-manager (`shutdown(wait=False)`) — چون `with` تا اتمام thread بلاک می‌شود و timeout را بی‌اثار می‌کند (باگ یافت‌شده و تست‌شده).
+
+
+## ۹. تصمیم‌های کلیدی فاز ۳ (Windows Integration)
+
+1. **گیت L2 با ApprovalToken یک‌بارمصرف** (بخش ۸): توکن به هش SHA-256 از (نام ابزار + پارامترهای کانونی) گره خورده؛ تغییر هر پارامتر پس از تأیید، اجرا را رد می‌کند؛ انقضا ۱۲۰ ثانیه؛ مدل هیچ راهی برای ساخت/دستکاری توکن ندارد.
+2. **PathGuard دو-لایه**: رد الگوی `..` قبل از resolve + تطبیق پس از resolve (شامل رفع symlink فرار) با allowlist قابل‌تنظیم از Settings/env.
+3. **CommandPolicy ساختارمند**: فرمان = برنامه + argv جدا (هیچ رشته‌ای وارد shell نمی‌شود)؛ allowlist قابل‌ توسعه؛ رد کاراکترهای تزریق/زنجیره؛ PowerShell فقط با -NoProfile -NonInteractive؛ runner با timeout + kill + سقف خروجی.
+4. **اجرای برنامه‌ها فقط از مسیر کشف‌شده** (Registry HKCU/HKLM + Start Menu) — «Shell آزاد ممنوع» با Popen(argv) بدون shell.
+5. **Development دور-زدن Terminal ندارد**: run_tests فقط `python -m pytest` ثابت را در پوشه مجاز می‌راند؛ هیچ ورودی مدل وارد argv نمی‌شود.
+6. **L3 در دو لایه سخت**: پنهان از پرامپت مدل (get_tool_schemas) + رد همیشگی در validate/execute حتی با توکن.

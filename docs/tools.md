@@ -1,6 +1,6 @@
 # کاتالوگ ابزارها (Tool Registry) — پیاده‌سازی فاز ۲ و طراحی فاز ۳
 
-نسخه سند: 1.1 — بخش‌های ۱ و ۲ در فاز ۲ **پیاده و تست‌شده**اند (۱۲۸ تست)؛ ابزارهای گروه filesystem/terminal/… برای فاز ۳ باقی می‌مانند.
+نسخه سند: 1.2 — بخش‌های ۱، ۲ و بخش filesystem (۱۰ ابزار) در فاز ۳ **پیاده و تست‌شده**اند (۲۷۷ تست).
 
 ## ۱. قرارداد هر ابزار (پیاده‌شده در `app/tools/base.py`)
 
@@ -81,7 +81,45 @@ class MyTool(Tool):
 
 بقیه ابزارهای گروه system (`get_cpu_usage`, `list_processes`, `get_process_info`, `get_network_info`) در فاز ۳ باقی‌اند — پایه psutil (Test 1).
 
-### terminal.py (بند ۹.۳) — فاز ۳؛ طبق الزام بخش پنجم فاز ۲، ابزارهای اجرای دستور/تغییر سیستم در این فاز عمداً پیاده **نشده‌اند**
+### filesystem.py (بند ۹.۱) — ✅ ۱۰ ابزار پیاده‌شده در فاز ۳
+
+| ابزار | سطح | وضعیت |
+|---|---|---|
+| `filesystem.list_directory` / `get_file_info` / `get_directory_tree` | L1 | ✅ |
+| `filesystem.search_files` / `search_text` | L1 | ✅ (جست‌وجوی نام/متن، سقف‌دار) |
+| `filesystem.read_file` | L1 | ✅ (سقف ۵۱۲KB، تشخیص encoding، رد باینری) |
+| `filesystem.create_directory` / `create_file` / `write_file` / `edit_file` | L2 | ✅ (تأیید کاربر؛ نوشتن اتمیک) |
+| `filesystem.delete_file` / `delete_directory` | L3 | ❌ عمداً پیاده نشده (بند ۴ فاز ۳) |
+
+امنیت: PathGuard دو-لایه (رد `..` + تطبیق پس از resolve + رد symlink فرار)، allowlist از Settings، سقف خروجی، رد PermissionDenied ساختاریافته.
+
+### terminal.py (بند ۹.۳) — ✅ ۲ ابزار پیاده‌شده در فاز ۳ با CommandPolicy
+
+| ابزار | سطح | قوانین |
+|---|---|---|
+| `terminal.execute_command` | L2 | allowlist ساختارمند (git/Get-*…/python/pip)؛ argv جدا بدون shell؛ رد تزریق/زنجیره/اسکریپت/مدیریتی؛ timeout ۳۰s؛ سقف خروجی؛ لغو |
+| `terminal.get_command_output` | L1 | آخرین خروجی فرمان |
+
+allowlist پیش‌فرض مطابق بخش ۶: Get-Location، Get-ChildItem، Get-ComputerInfo (خروجی محدود)، Get-Date، python --version، git --version/status، pip --version — قابل توسعه از `defaults.TERMINAL_ALLOWED_COMMANDS`. اجرای آزاد PowerShell/CMD توسط مدل **ممنوع** و پیاده نشده.
+
+### applications.py (بند ۹.۴) — ✅ ۴ ابزار پیاده‌شده در فاز ۳
+
+| ابزار | سطح | وضعیت |
+|---|---|---|
+| `applications.list_installed_apps` / `search_app` | L1 | ✅ (رجیستری HKCU/HKLM + Start Menu؛ بدون Administrator) |
+| `applications.get_running_apps` | L1 | ✅ (فرآیند سیستمی حساس پنهان) |
+| `applications.launch_app` | L2 | ✅ (فقط از مسیر کشف‌شده؛ Popen بدون shell؛ تأیید کاربر) |
+| `applications.close_application` | L3 | ❌ عمداً پیاده نشده در این فاز |
+
+### development.py (بند ۹.۵) — ✅ ۶ ابزار پیاده‌شده در فاز ۳
+
+| ابزار | سطح | وضعیت |
+|---|---|---|
+| `development.inspect_project` / `get_project_structure` / `read_project_file` | L1 | ✅ |
+| `development.get_test_results` / `get_git_status` | L1 | ✅ (git status ثابت ساختارمند) |
+| `development.run_tests` | L2 | ✅ (`python -m pytest` ثابت؛ timeout؛ خروجی خلاصه/محدود؛ مسیر مجاز) |
+
+هرگز ورودی مدل به argv تست/فرمان وارد نمی‌شود (ضد دور-زدن Terminal).
 
 | ابزار | سطح | قوانین |
 |---|---|---|

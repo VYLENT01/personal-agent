@@ -46,7 +46,8 @@ def _wait_until(condition, timeout: float = 5.0) -> bool:
 
 def _make_context(tmp_path: Path, script, native_tools: bool = False) -> object:
     provider = FakeLLMClient(script=script, native_tools=native_tools)
-    settings = Settings(active_model="qwen3:8b")
+    # فاز ۳: tmp_path به‌عنوان مسیر مجاز ابزارهای filesystem/development
+    settings = Settings(active_model="qwen3:8b", allowed_paths=[str(tmp_path)])
     return build_app_context(
         root=tmp_path, settings=settings, provider=provider, configure_log=False
     )
@@ -169,4 +170,97 @@ class TestMainWindow:
         assert "ثبت نشده" in tool_bubbles[0].result_label.text()
         # UI همچنان پاسخ‌گوست
         assert page.send_button.text() == "ارسال"
+        window.close()
+
+
+# ===========================================================================
+# فاز ۳ — UI تأیید عملیات L2 و حباب وضعیت (بخش ۹)
+# ===========================================================================
+
+class TestApprovalUI:
+    def test_l2_shows_approval_dialog_and_denies(self, qapp, tmp_path, monkeypatch) -> None:
+        # دیالوگ به‌جای تعامل واقعی، خودکار «رد» می‌شود (تست offscreen)
+        from PySide6.QtWidgets import QDialog
+
+        from app.ui.chat import ToolBubble
+        from app.ui.window import MainWindow
+
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+        script = [
+            {
+                "tool_calls": [
+                    {"name": "filesystem.write_file",
+                     "args": {"path": str(tmp_path / "x.txt"), "content": "x"}}
+                ]
+            },
+            "عملیات رد شد.",
+        ]
+        # مسیر مجاز: tmp_path خودِ تست
+        context = _make_context(tmp_path, script, native_tools=True)
+        window = MainWindow(context)
+        page = window.chat_page
+        page.submit("فایل بساز")
+        finished = _wait_until(lambda: page._worker is None, timeout=8.0)
+        assert finished
+        tool_bubbles = [b for b in page._bubbles if isinstance(b, ToolBubble)]
+        assert tool_bubbles, "حباب ابزار نمایش داده نشد"
+        bubble = tool_bubbles[0]
+        # وضعیت رد در حباب
+        assert "⛔" in bubble.result_label.text() or "رد" in bubble.result_label.text()
+        # فایل ساخته نشد
+        assert not (tmp_path / "x.txt").exists()
+        # گفت‌وگو همچنان پاسخ‌گو
+        assert page.send_button.text() == "ارسال"
+        window.close()
+
+    def test_l2_approval_dialog_approves_and_executes(self, qapp, tmp_path, monkeypatch) -> None:
+        from PySide6.QtWidgets import QDialog
+
+        from app.ui.chat import ToolBubble
+        from app.ui.window import MainWindow
+
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+        target = tmp_path / "approved.txt"
+        script = [
+            {
+                "tool_calls": [
+                    {"name": "filesystem.write_file",
+                     "args": {"path": str(target), "content": "تأیید UI"}}
+                ]
+            },
+            "فایل ساخته شد.",
+        ]
+        context = _make_context(tmp_path, script, native_tools=True)
+        window = MainWindow(context)
+        page = window.chat_page
+        page.submit("بنویس")
+        finished = _wait_until(lambda: page._worker is None, timeout=8.0)
+        assert finished
+        # فایل واقعاً با تأیید UI ساخته شد (توکن از PermissionManager)
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "تأیید UI"
+        tool_bubbles = [b for b in page._bubbles if isinstance(b, ToolBubble)]
+        assert "✅" in tool_bubbles[0].result_label.text()
+        window.close()
+
+    def test_approval_status_texts_and_steps(self, qapp, tmp_path, monkeypatch) -> None:
+        from PySide6.QtWidgets import QDialog
+
+        from app.ui.window import MainWindow
+
+        monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+        script = [
+            {"tool_calls": [{"name": "filesystem.create_directory",
+                            "args": {"path": str(tmp_path / "d1")}}]},
+            "پاسخ",
+        ]
+        context = _make_context(tmp_path, script, native_tools=True)
+        window = MainWindow(context)
+        page = window.chat_page
+        page.submit("پوشه بساز")
+        finished = _wait_until(lambda: page._worker is None, timeout=8.0)
+        assert finished
+        # نوار وضعیت در پایان به حالت عادی برگشت و مراحل اجرا ثبت شد
+        assert page.status_label.text() in ("انجام شد", "خطا")
+        assert page._agent_steps >= 2  # درخواست + نتیجه
         window.close()

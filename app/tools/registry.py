@@ -1,16 +1,18 @@
 """Registry مرکزی ابزارها.
 
-قابلیت‌ها (بخش دوم مشخصات):
+قابلیت‌ها:
 - register_tool / unregister_tool / get_tool / list_tools
 - get_tool_schemas → فریم wire برای پارامتر tools مدل
 - validate_tool_call → اعتبارسنجی مستقل از LLM
 - execute_tool → اجرای کنترل‌شده با timeout، مجوز و نگاشت خطا
+- فاز ۳: needs_approval + اجرای L2 فقط با ApprovalToken یک‌بارمصرف
 
 ضمانت‌ها:
-- ابزار تکراری ثبت نمی‌شود (ValueError با نام ابزار موجود)
+- ابزار تکراری ثبت نمی‌شود (DuplicateToolError با نام ابزار موجود)
 - ابزار ثبت‌نشده اجرا نمی‌شود (ToolNotFound)
-- ابزار غیرفعال/غیرمجاز (L2/L3 در این فاز) اجرا نمی‌شود (PermissionDenied)
-- مدل فقط ابزارهای فعالِ مجاز را می‌بیند (get_tool_schemas فیلتر می‌کند)
+- L3 همیشه رد و از دید مدل پنهان است
+- L2 فقط با ApprovalToken متناسب با همان (نام+پارامتر) اجرا می‌شود
+- مدل فقط ابزارهای فعالِ زیر سقف مجاز را می‌بیند (get_tool_schemas فیلتر می‌کند)
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from app.tools.base import (
 
 if TYPE_CHECKING:  # pragma: no cover - فقط تایپ
     from app.llm.base import CancelToken
+    from app.security.permissions import ApprovalToken
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,7 @@ class DuplicateToolError(Exception):
 
 
 class PermissionDeniedError(Exception):
-    """سطح دسترسی ابزار در این نسخه مجاز نیست (L2/L3 نیاز به فاز ۵ دارند)."""
+    """سطح دسترسی ابزار در این نسخه مجاز نیست."""
 
 
 class ToolRegistry:
@@ -50,7 +53,7 @@ class ToolRegistry:
     def __init__(
         self,
         *,
-        max_permission: PermissionLevel = PermissionLevel.L1_READ_ONLY,
+        max_permission: PermissionLevel = PermissionLevel.L2_WRITE,
         tool_timeout: float = d.TOOL_TIMEOUT_SECONDS,
     ) -> None:
         self._tools: dict[str, Tool] = {}
@@ -211,11 +214,28 @@ class ToolRegistry:
             return False, tool, error
         return True, tool, None
 
-    def execute_tool(self, name: str, args: Optional[dict[str, Any]]) -> ToolResult:
-        """اجرای کامل کنترل‌شده: اعتبارسنجی → مجوز → timeout → ToolResult.
+    def needs_approval(self, name: str) -> bool:
+        """آیا این ابزار برای اجرا به تأیید کاربر نیاز دارد؟ (L2، بخش ۸)"""
+        with self._lock:
+            tool = self._tools.get(name)
+        if tool is None:
+            return False
+        return PermissionLevel.L1_READ_ONLY < tool.permission_level <= self._max_permission
 
-        هر شکست (وجود/مجوز/اعتبارسنجی/timeout/خطای داخلی) به ToolResult
-        ساختاریافته با پیام فارسی تبدیل می‌شود؛ exception بیرون نمی‌رود.
+    def execute_tool(
+        self,
+        name: str,
+        args: Optional[dict[str, Any]],
+        *,
+        approval: Optional["ApprovalToken"] = None,
+    ) -> ToolResult:
+        """اجرای کامل کنترل‌شده: اعتبارسنجی → مجوز → تأیید → timeout → ToolResult.
+
+        هر شکست (وجود/مجوز/اعتبارسنجی/بدون تأیید/timeout/خطای داخلی) به
+        ToolResult ساختاریافته با پیام فارسی تبدیل می‌شود؛ exception بیرون نمی‌رود.
+
+        فاز ۳: ابزار L2 فقط با approval معتبر برای همان (نام+args) اجرا می‌شود؛
+        توکن یک‌بارمصرف است و تغییر پارامتر آن را بی‌اعتبار می‌کند.
         """
         ready, tool, error = self.validate_tool_call(name, args)
         if not ready:
@@ -225,6 +245,22 @@ class ToolRegistry:
         assert tool is not None  # برای type-checker؛ ready=True تضمینش می‌کند
         if tool.permission_level > self._max_permission:  # pragma: no cover - گارد مضاعف
             return ToolResult.fail(name, "سطح دسترسی مجاز نیست.")
+
+        # --- گیت تأیید کاربر برای L2 (بخش ۸ فاز ۳) ---
+        if self.needs_approval(name):
+            from app.security.permissions import ApprovalError
+
+            if approval is None:
+                self._bump("rejected")
+                return ToolResult.fail(
+                    name,
+                    "این عملیات نیازمند تأیید کاربر است و بدون آن اجرا نمی‌شود.",
+                )
+            try:
+                approval.consume(name, args or {})
+            except ApprovalError as exc:
+                self._bump("rejected")
+                return ToolResult.fail(name, str(exc))
 
         result = self._run_with_timeout(tool, args or {})
         self._bump("executed" if result.success else "failed")

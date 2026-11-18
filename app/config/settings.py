@@ -59,6 +59,8 @@ class Settings:
     max_history_messages: int = d.DEFAULT_MAX_HISTORY_MESSAGES
     max_context_chars: int = d.DEFAULT_MAX_CONTEXT_CHARS
     log_level: str = d.DEFAULT_LOG_LEVEL
+    # فاز ۳ — مسیرهای مجاز ابزارها (String؛ None یعنی پیش‌فرض‌های defaults.py)
+    allowed_paths: Optional[list[str]] = None
     _path: Optional[Path] = field(default=None, repr=False, compare=False)
 
     # ---------- ساخت/بارگذاری ----------
@@ -108,6 +110,7 @@ class Settings:
             ),
             max_context_chars=_to_int(data.get("max_context_chars"), d.DEFAULT_MAX_CONTEXT_CHARS),
             log_level=str(data.get("log_level", d.DEFAULT_LOG_LEVEL)).upper(),
+            allowed_paths=_clean_allowed_paths(data.get("allowed_paths")),
         )
         settings.apply_env_overrides()
         settings.sanitize()
@@ -123,6 +126,16 @@ class Settings:
             self.language = lang.strip().lower()
         if (level := os.environ.get(d.ENV_KEY_LOG_LEVEL)) :
             self.log_level = level.strip().upper()
+        if (raw_paths := os.environ.get(d.ENV_KEY_ALLOWED_PATHS)) :
+            parts = [part.strip() for part in raw_paths.split("|") if part.strip()]
+            if parts:
+                self.allowed_paths = parts
+
+    def resolved_allowed_paths(self) -> list[str]:
+        """فهرست نهایی مسیرهای مجاز (پیش‌فرض اگر تنظیم نشده باشد)."""
+        if self.allowed_paths:
+            return [str(path) for path in self.allowed_paths]
+        return list(d.DEFAULT_ALLOWED_PATHS)
 
     # ---------- اعتبارسنجی ----------
 
@@ -188,6 +201,16 @@ class Settings:
     @property
     def path(self) -> Optional[Path]:
         return self._path
+
+
+def _clean_allowed_paths(value: Any) -> Optional[list[str]]:
+    """نرمال‌سازی مسیرهای مجاز: لیست یا رشته «|»-جدا → لیست تمیز یا None."""
+    if isinstance(value, str):
+        value = value.split("|")
+    if not isinstance(value, list):
+        return None
+    cleaned = [str(item).strip() for item in value if str(item).strip()]
+    return cleaned or None
 
 
 # ---------- ابزارهای کمکی ----------

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from app.agent.orchestrator import (
     AgentEvent,
+    ApprovalRequested,
     ChatOrchestrator,
     ContentDelta,
     ThinkingDelta,
@@ -162,6 +163,11 @@ class ToolBubble(QFrame):
 
     def mark_running(self) -> None:
         self._set_status("در حال اجرا…")
+
+    def mark_awaiting_approval(self) -> None:
+        """وضعیت انتظار تأیید کاربر (L2) — بخش ۹ فاز ۳."""
+        self.result_label.setText("⏸ در انتظار تأیید شما…")
+        self._set_status("در انتظار تأیید کاربر")
 
     def mark_finished(self, result) -> None:
         """نمایش نتیجه ساختاریافته ToolResult (موفق یا خطا)."""
@@ -326,6 +332,17 @@ class ChatPage(QWidget):
                 f"مرحله {self._agent_steps}: ابزار {call.name} درخواست شد"
             )
 
+        elif isinstance(agent_event, ApprovalRequested):
+            # بخش ۹ فاز ۳: درخواست تأیید کاربر برای عملیات L2
+            self._agent_steps += 1
+            bubble = self._last_tool_bubble()
+            if bubble is not None:
+                bubble.mark_awaiting_approval()
+            self.status_label.setText(
+                f"مرحله {self._agent_steps}: در انتظار تأیید شما برای {agent_event.tool_name}…"
+            )
+            self._show_approval_dialog(agent_event)
+
         elif isinstance(agent_event, ToolCallStarted):
             bubble = self._last_tool_bubble()
             if bubble is not None:
@@ -397,6 +414,73 @@ class ChatPage(QWidget):
         self._bubbles.append(bubble)
         self._scroll_to_bottom()
         return bubble
+
+    # ------------------------------------------------------------------
+    # دیالوگ تأیید عملیات L2 (بخش ۹ فاز ۳)
+    # ------------------------------------------------------------------
+
+    def _show_approval_dialog(self, request: ApprovalRequested) -> None:
+        """دیالوگ مودال تأیید/رد با پارامترهای دقیق؛ توکن متناسب می‌سازد.
+
+        - نمایش: نام ابزار + پارامترها (مسیر فایل/برنامه/فرمان) + هشدار
+        - تأیید → PermissionManager.create_token(نام، args) → resolve_approve
+          (توکن به همان نام+پارامتر گره خورده؛ تغییر بعدی آن را بی‌اعتبار می‌کند)
+        - رد → resolve_deny
+        - بستن با Esc/X → رد در نظر گرفته می‌شود (سیاست محافظه‌کارانه)
+        """
+        import json as _json
+
+        from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+
+        rtl = self._context.settings.language == "fa"
+        manager = getattr(self._context, "permission_manager", None)
+
+        dialog = QDialog(self)
+        dialog.setObjectName("approvalDialog")
+        dialog.setWindowTitle("تأیید عملیات" if rtl else "Approve Operation")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(f"⚠️ عملیات «{request.tool_name}» نیازمند تأیید شماست")
+        title.setObjectName("approvalTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        args_text = _json.dumps(request.args, ensure_ascii=False, indent=2)
+        args_label = QLabel(f"پارامترها:\n{args_text}")
+        args_label.setObjectName("approvalArgs")
+        args_label.setWordWrap(True)
+        args_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(args_label)
+
+        buttons_row = QHBoxLayout()
+        approve_btn = QPushButton("تأیید و اجرا" if rtl else "Approve")
+        deny_btn = QPushButton("رد" if rtl else "Deny")
+        approve_btn.setObjectName("approveButton")
+        deny_btn.setObjectName("denyButton")
+        approve_btn.clicked.connect(dialog.accept)
+        deny_btn.clicked.connect(dialog.reject)
+        buttons_row.addWidget(approve_btn)
+        buttons_row.addWidget(deny_btn)
+        layout.addLayout(buttons_row)
+
+        dialog.setModal(True)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            token = None
+            if manager is not None:
+                token = manager.create_token(request.tool_name, request.args)
+            if token is not None:
+                request.resolve_approve(token)
+            else:
+                # بدون PermissionManager نمی‌توان توکن ساخت → عملیات رد
+                logger.warning("تأیید بدون مدیر مجوز انجام شد؛ عملیات رد می‌شود")
+                request.resolve_deny()
+        else:
+            request.resolve_deny()
 
     def _hide_empty_hint(self) -> None:
         self.empty_hint.hide()
