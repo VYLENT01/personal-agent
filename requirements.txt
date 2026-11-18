@@ -1,0 +1,8 @@
+# وابستگی‌های اصلی برنامه
+# تمام نسخه‌ها با Python 3.12 و Windows سازگار هستند.
+requests>=2.32,<3        # ارتباط با HTTP API رسمی Ollama
+PySide6>=6.7,<7         # رابط کاربری (Qt 6)
+psutil>=6.0,<7          # اطلاعات سیستم (CPU/RAM/Disk/Process)
+
+# وابستگی‌های توسعه (نصب جداگانه): pip install -e ".[dev]"
+# pytest>=8.0

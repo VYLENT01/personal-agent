@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# محرمانه — اطلاعات حساس هرگز در مخزن قرار نمی‌گیرد
+.env
+
+# داده‌ها و لاگ‌های زمان اجرا (ساختار پوشه‌ها با .gitkeep حفظ می‌شود)
+data/config/*
+data/cache/*
+data/conversations/*
+data/database/*
+data/memory/*
+logs/*
+!data/**/.gitkeep
+!logs/.gitkeep
+
+# IDE / سیستم‌عامل
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
