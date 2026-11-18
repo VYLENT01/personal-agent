@@ -2,6 +2,9 @@
 
 حافظه کوتاه‌مدت درون-برنامه: پیام‌های مکالمه فعلی نگهداری و
 بر اساس سقف پیام/کاراکتر، پنجره‌ای از آخرین پیام‌ها ساخته می‌شود.
+
+فاز ۲: پیام‌های ابزار (فراخوانی دستیار + نتیجه role=tool) هم همین‌جا
+حفظ می‌شوند تا حلقه Agent در تکرار بعدی آن‌ها را به مدل بفرستد.
 """
 from __future__ import annotations
 
@@ -33,6 +36,28 @@ class ConversationState:
     ) -> ChatMessage:
         message = ChatMessage.assistant(content)
         message.meta = {"thinking": thinking, **meta}
+        self.messages.append(message)
+        return message
+
+    def append_assistant_with_calls(
+        self, content: str, tool_calls: list[Any], *, thinking: str = ""
+    ) -> ChatMessage:
+        """پیام دستیار همراه فراخوانی‌های ابزار (فاز ۲).
+
+        ابزارهای بی‌نتیجه (ولی با فراخوانی) در Context حفظ می‌شوند تا
+        مدل بداند چه درخواستی داده و چه پاسخی گرفته است.
+        """
+        message = ChatMessage.assistant(content, tool_calls=tool_calls)
+        message.meta = {"thinking": thinking}
+        self.messages.append(message)
+        return message
+
+    def append_tool_result(
+        self, tool_name: str, result_text: str, *, tool_call_id: Optional[str] = None
+    ) -> ChatMessage:
+        """پیام نتیجه ابزار (role=tool) برای ارسال به مدل در تکرار بعدی."""
+        message = ChatMessage.tool(result_text, tool_call_id=tool_call_id)
+        message.meta = {"tool_name": tool_name}
         self.messages.append(message)
         return message
 

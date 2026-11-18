@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-agent"
-version = "0.1.0"
-description = "Local-first personal AI agent for Windows (Phase 1: Local AI Core)"
+version = "0.2.0"
+description = "Local-first personal AI agent for Windows (Phase 2: Tool Calling)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.32,<3",
     "PySide6>=6.7,<7",
     "psutil>=6.0,<7",
+    "pydantic>=2.7,<3",
 ]
 
 [project.optional-dependencies]

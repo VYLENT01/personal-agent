@@ -1,37 +1,68 @@
 """Orchestrator — مرکز تصمیم‌گیری و مدیریت اجرای درخواست کاربر.
 
-چرخه اصلی (طبق بند ۱۰ مشخصات):
-دریافت درخواست → بررسی Context → ارسال به LLM (استریم) → تفکیک thinking
-→ ثبت پاسخ در وضعیت مکالمه → ارائه پاسخ نهایی.
+چرخه اصلی (بخش چهارم فاز ۲؛ ده مرحله):
+۱. دریافت درخواست کاربر
+۲. ارسال Context و ابزارهای مجاز به مدل (native یا fallback بر اساس قابلیت واقعی مدل)
+۳. دریافت پاسخ (استریم؛ تفکیک thinking)
+۴. تشخیص Tool Call (tool_calls بومی یا بلوک JSON در متن — فقط در مسیر fallback)
+۵. اعتبارسنجی ابزار و پارامترها (Registry + Pydantic، مستقل از LLM)
+۶. بررسی مجوز (L1 اجرا؛ L2/L3 رد — فاز ۵)
+۷. اجرای ابزار (timeout؛ در همان thread کارگری)
+۸. دریافت نتیجه ساختاریافته
+۹. ارسال نتیجه به مدل (پیام role=tool در native / پیام کاربر با پیشوند در fallback)
+۱۰. تولید پاسخ نهایی
 
-از فاز ۲ به بعد، همین چرخه بین «پاسخ متنی» و «Tool Call» تصمیم می‌گیرد؛
-ساختار رویدادها (AgentEvent) از هم‌اکنون برای آن آماده است.
+محدودیت‌ها (بخش چهارم):
+- سقف MAX_TOOL_CALLS_PER_TURN و سقف iteration کل → جلوگیری از Loop بی‌نهایت
+- Timeout ابزار در Registry؛ Timeout مدل در کلاینت
+- Cancel در هر لحظه (توکن + بستن socket)
+- خطای ابزار به ToolResult.fail → به مدل برمی‌گردد (نه کرش)
+- Tool Callهای متعدد در یک پاسخ: به‌ترتیب اجرا می‌شوند
+- وضعیت مکالمه کامل حفظ می‌شود (پیام‌های ابزار در state)
 
 نکته‌های معماری:
 - stream_turn یک generator است و در Thread کارگری UI اجرا می‌شود؛ UI هنگ نمی‌کند.
-- لغو عملیات با CancelToken + بستن socket از طریق provider (سریع، بدون انتظار).
-- سقف iteration برای جلوگیری از حلقه بی‌نهایت (MAX_AGENT_ITERATIONS).
+- هیچ وابستگی Agent Core به فرمت اختصاصی مدل نیست: تفکیک native/fallback
+  با قرارداد BaseLLMClient و supports_native_tools انجام می‌شود.
+- در مسیر native، tools به کلاینت داده می‌شود و مدل از message.tool_calls
+  پاسخ می‌دهد؛ در fallback، پروتکل JSON در پیام سیستم تعریف و از متن پاسخ
+  استخراج می‌شود (extract_json_candidates — تست‌شده فاز ۱).
+- رفع باگ فاز ۱: پیام کاربر دیگر هم در پنجره Context و هم جداگانه ارسال
+  نمی‌شود؛ پنجره قبل از append_user گرفته می‌شود.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Iterator, Optional, Union
+from typing import Any, Iterator, Optional, Sequence, Union
 
-from app.agent.prompts import build_messages, build_system_prompt
+from app.agent.prompts import (
+    build_messages,
+    build_system_prompt,
+    tool_result_user_message,
+)
 from app.agent.state import ConversationState
 from app.config import defaults as d
 from app.config.settings import Settings
 from app.llm.base import (
     BaseLLMClient,
     CancelToken,
+    ChatMessage,
     LLMCancelledError,
     LLMError,
     ModelInfo,
+    ToolCall,
 )
 from app.llm.model_manager import ModelManager
-from app.llm.response_parser import StreamThinkSplitter
+from app.llm.response_parser import (
+    StreamThinkSplitter,
+    extract_content,
+    extract_json_candidates,
+    try_parse_json,
+)
+from app.tools.base import ToolResult
+from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +73,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TurnStarted:
-    """شروع نوبت پاسخ‌گویی؛ مدل انتخاب‌شده را اعلام می‌کند."""
+    """شروع نوبت پاسخ‌گویی؛ مدل و مسیر ابزار (native/fallback/none)."""
 
     model: Optional[str] = None
+    tool_mode: str = "none"          # none | native | fallback
 
 
 @dataclass
@@ -62,6 +94,33 @@ class ContentDelta:
 
 
 @dataclass
+class ToolCallRequested:
+    """مدل یک ابزار را خواسته (بعد از اعتبارسنجی اولیه نام)."""
+
+    call: ToolCall
+    index: int                        # شماره فراخوانی در این نوبت
+    iteration: int                    # شماره تکرار حلقه
+
+
+@dataclass
+class ToolCallStarted:
+    """اجرای ابزار آغاز شد (پارامترها معتبر و مجاز)."""
+
+    name: str
+    args: dict[str, Any]
+    index: int
+
+
+@dataclass
+class ToolCallFinished:
+    """نتیجه اجرای ابزار (موفق یا خطا) — ساختاریافته."""
+
+    result: ToolResult
+    args: dict[str, Any]
+    index: int
+
+
+@dataclass
 class TurnCompleted:
     """پایان موفق نوبت."""
 
@@ -69,6 +128,8 @@ class TurnCompleted:
     thinking: str = ""
     model: Optional[str] = None
     duration: float = 0.0
+    tool_calls: int = 0               # تعداد کل فراخوانی‌های ابزار این نوبت
+    iterations: int = 1               # تعداد مراحل اجرای Agent
 
 
 @dataclass
@@ -87,23 +148,36 @@ class TurnFailed:
     recoverable: bool = True
 
 
-AgentEvent = Union[TurnStarted, ThinkingDelta, ContentDelta, TurnCompleted, TurnCancelled, TurnFailed]
+AgentEvent = Union[
+    TurnStarted,
+    ThinkingDelta,
+    ContentDelta,
+    ToolCallRequested,
+    ToolCallStarted,
+    ToolCallFinished,
+    TurnCompleted,
+    TurnCancelled,
+    TurnFailed,
+]
 
 
 class ChatOrchestrator:
-    """هماهنگ‌کننده اصلی گفت‌وگو بین UI و موتور مدل."""
+    """هماهنگ‌کننده اصلی گفت‌وگو بین UI و موتور مدل و ابزارها."""
 
     def __init__(
         self,
         provider: BaseLLMClient,
         model_manager: ModelManager,
         settings: Settings,
+        tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
         self.provider = provider
         self.model_manager = model_manager
         self.settings = settings
+        self.tool_registry = tool_registry or ToolRegistry()
         self.state = ConversationState()
         self.iterations_limit = d.MAX_AGENT_ITERATIONS
+        self.max_tool_calls = d.MAX_TOOL_CALLS_PER_TURN
         self._cancel: Optional[CancelToken] = None
 
     # --- تزریق مجدد اجزا هنگام تغییر تنظیمات ---
@@ -114,13 +188,18 @@ class ChatOrchestrator:
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
 
-    # --- نوبت گفت‌وگو ---
+    def set_tool_registry(self, registry: ToolRegistry) -> None:
+        self.tool_registry = registry
+
+    # ------------------------------------------------------------------
+    # نوبت گفت‌وگو — حلقه کامل Agent
+    # ------------------------------------------------------------------
 
     def stream_turn(self, user_text: str) -> Iterator[AgentEvent]:
-        """اجرای یک نوبت کامل؛ رویدادها به‌صورت استریم به UI می‌رسند.
+        """اجرای یک نوبت کامل با حلقه ابزار؛ رویدادها استریم به UI می‌رسند.
 
-        هر خطا به TurnFailed با پیام فارسی قابل‌نمایش تبدیل می‌شود؛
-        هیچ exception از این generator به UI نمی‌رسد.
+        هر خطا به TurnFailed با پیام فارسی تبدیل می‌شود؛ هیچ exception
+        از این generator به UI نمی‌رسد.
         """
         text = (user_text or "").strip()
         if not text:
@@ -129,35 +208,215 @@ class ChatOrchestrator:
 
         token = CancelToken()
         self._cancel = token
+        # اجرای ابزار هم همان توکن لغو نوبت را می‌بیند (بخش چهارم: امکان Cancel)
+        try:
+            self.tool_registry.bind_cancel_token(token)
+        except Exception:  # noqa: BLE001 - سیم‌کیری توکن هرگز نوبت را نباید بکشد
+            logger.debug("اتصال توکن لغو به Registry ناموفق", exc_info=True)
         model = self.model_manager.active_model()
+        started = perf_counter()
 
-        self.state.append_user(text)
-        yield TurnStarted(model=model)
-
-        messages = build_messages(
-            build_system_prompt(self.settings.language),
-            self.state.window(
-                self.settings.max_history_messages,
-                self.settings.max_context_chars,
-            ),
-            text,
+        # رفع باگ فاز ۱: پنجره Context «قبل» از افزودن پیام جدید گرفته می‌شود
+        history_window = self.state.window(
+            self.settings.max_history_messages,
+            self.settings.max_context_chars,
         )
-        options = self.settings.generation.to_options()
+        self.state.append_user(text)
 
+        # --- تعیین مسیر ابزار بر اساس قابلیت واقعی مدل ---
+        registry = self.tool_registry
+        schemas = registry.get_tool_schemas()
+        tool_mode = self._resolve_tool_mode(model, schemas)
+
+        yield TurnStarted(model=model, tool_mode=tool_mode)
+
+        turn_tool_calls = 0
+        iteration = 0
+        pending_result_messages: list[ChatMessage] = []  # پیام‌های نتیجه این تکرار
+
+        while iteration < self.iterations_limit:
+            iteration += 1
+            if token.is_cancelled():
+                yield TurnCancelled()
+                return
+
+            # --- ۲. ساخت پیام‌ها (سیستم + تاریخچه + کاربر + نتایج ابزار) ---
+            system_prompt = build_system_prompt(
+                self.settings.language,
+                registry.capabilities_prompt(self.settings.language) if schemas else (),
+                tool_mode=tool_mode,
+            )
+            if tool_mode == "fallback" and iteration > 1:
+                # در مسیر fallback نتیجه ابزار به‌عنوان پیام کاربر می‌رود
+                user_text_for_model = tool_result_user_message(
+                    pending_result_messages[-1].meta.get("tool_name", "tool"),
+                    pending_result_messages[-1].content,
+                    self.settings.language,
+                )
+                messages = build_messages(system_prompt, history_window, user_text_for_model)
+            else:
+                messages = build_messages(system_prompt, history_window, text)
+                if tool_mode == "native":
+                    # نتایج ابزار تکرارهای قبلی به‌عنوان پیام‌های role=tool
+                    messages.extend(pending_result_messages)
+
+            options = self.settings.generation.to_options()
+            tools_param = schemas if tool_mode == "native" else None
+
+            # --- ۳/۴. دریافت پاسخ و تشخیص Tool Call ---
+            # outcome همیشه دیکشنری نتیجه است؛ رویدادهای پایان (TurnFailed/
+            # TurnCancelled) داخل آن با کلیدهای "failed"/"cancelled" می‌آیند.
+            outcome = yield from self._stream_llm_call(
+                messages, model, options, tools_param, token
+            )
+            if outcome.get("failed") is not None:
+                yield outcome["failed"]
+                return
+            if outcome.get("cancelled") is not None:
+                yield outcome["cancelled"]
+                return
+
+            content: str = outcome["content"]
+            thinking: str = outcome["thinking"]
+            native_calls: list[ToolCall] = outcome["tool_calls"]
+
+            # --- Tool Callهای مسیر fallback از متن پاسخ ---
+            fallback_calls: list[ToolCall] = []
+            if tool_mode == "fallback" and content:
+                fallback_calls = self._extract_fallback_calls(content)
+                if fallback_calls:
+                    # پاسخ فقط بلوک ابزار است؛ محتوای متنی نمایشی باقی نمی‌ماند
+                    content = ""
+
+            calls = native_calls if tool_mode == "native" else fallback_calls
+
+            if not calls:
+                # --- بدون ابزار: پاسخ نهایی ---
+                if not content and not thinking:
+                    yield TurnFailed(
+                        error="مدل پاسخی تولید نکرد (خروجی خالی بود). دوباره تلاش کنید.",
+                        kind="LLMResponseError",
+                    )
+                    return
+                self.state.append_assistant(content, thinking=thinking)
+                yield TurnCompleted(
+                    content=content,
+                    thinking=thinking,
+                    model=model,
+                    duration=round(perf_counter() - started, 3),
+                    tool_calls=turn_tool_calls,
+                    iterations=iteration,
+                )
+                return
+
+            # --- ۵–۸. فراخوانی ابزارها ---
+            if turn_tool_calls + len(calls) > self.max_tool_calls:
+                logger.info(
+                    "سقف فراخوانی ابزار این نوبت (%d) پر شد؛ باقی رد شد.",
+                    self.max_tool_calls,
+                )
+                calls = calls[: self.max_tool_calls - turn_tool_calls]
+                if not calls:
+                    self.state.append_assistant(content, thinking=thinking)
+                    yield TurnCompleted(
+                        content=content or "به سقف فراخوانی ابزار رسیدم؛ پاسخ بر پایهٔ داده‌های موجود:",
+                        thinking=thinking,
+                        model=model,
+                        duration=round(perf_counter() - started, 3),
+                        tool_calls=turn_tool_calls,
+                        iterations=iteration,
+                    )
+                    return
+
+            # ثبت پیام دستیار همراه فراخوانی‌ها (قبل از اجرا؛ تا Context دقیق بماند)
+            self.state.append_assistant_with_calls(content, calls, thinking=thinking)
+
+            pending_result_messages = []
+            for index, call in enumerate(calls, start=turn_tool_calls + 1):
+                yield ToolCallRequested(call=call, index=index, iteration=iteration)
+
+                # اعتبارسنجی + مجوز (مرحله ۵ و ۶)
+                ready, tool, validation_error = registry.validate_tool_call(
+                    call.name, call.args
+                )
+                if not ready:
+                    result = ToolResult.fail(
+                        call.name, validation_error or "فراخوانی رد شد."
+                    )
+                else:
+                    assert tool is not None
+                    yield ToolCallStarted(name=call.name, args=call.args, index=index)
+                    # --- ۷/۸. اجرا با timeout داخلی Registry ---
+                    result = registry.execute_tool(call.name, call.args)
+
+                yield ToolCallFinished(result=result, args=call.args, index=index)
+                turn_tool_calls += 1
+
+                # --- ۹. آماده‌سازی نتیجه برای مدل (تکرار بعد) + ثبت در تاریخچه ---
+                result_text = result.truncate_for_llm()
+                if tool_mode == "native":
+                    # ثبت در state با نقش tool (تاریخچه کامل مکالمه)
+                    state_message = self.state.append_tool_result(
+                        call.name, result_text, tool_call_id=call.id
+                    )
+                    # پیام ارسالی به مدل همان فریم state است (ارجاع مشترک امن:
+                    # meta فقط خوانده می‌شود)
+                    pending_result_messages.append(state_message)
+                else:
+                    self.state.append_tool_result(call.name, result_text)
+                    pending_result_messages.append(
+                        _fallback_pending(call.name, result_text)
+                    )
+
+            # حلقه ادامه می‌یابد: مدل نتیجه را می‌بیند و پاسخ نهایی می‌سازد
+            if iteration >= self.iterations_limit:
+                # سقف مراحل Agent؛ بدون پاسخ نهایی نوبت را محترمانه می‌بندیم
+                yield TurnFailed(
+                    error=(
+                        f"به سقف مراحل اجرای Agent ({self.iterations_limit}) رسیدم "
+                        "بدون پاسخ نهایی. درخواست را ساده‌تر یا مشخص‌تر بپرسید."
+                    ),
+                    kind="IterationLimit",
+                    recoverable=True,
+                )
+                return
+
+        # pragma: no cover - حلقه بالا همیشه return می‌کند
+        yield TurnFailed(error="حلقه ایجنت به پایان غیرمنتظره رسید.", kind="InternalError")
+
+    # ------------------------------------------------------------------
+    # زیر-چرخه: یک فراخوانی استریم LLM
+    # ------------------------------------------------------------------
+
+    def _stream_llm_call(
+        self,
+        messages: Sequence[ChatMessage],
+        model: str,
+        options: dict[str, Any],
+        tools: Optional[Sequence[dict[str, Any]]],
+        token: CancelToken,
+    ) -> Iterator[AgentEvent]:
+        """یک فراخوانی استریم LLM؛ رویدادها را yield می‌کند و dict نتیجه برمی‌گرداند.
+
+        الگو: «yield برای رویدادهای نمایشی + return برای نتیجه» — چون در
+        Python نتیجهٔ `yield from` مقدار return زیر-ژنراتور است، کلیدهای
+        failed/cancelled هم داخل dict نتیجه حمل می‌شوند.
+        """
         splitter = StreamThinkSplitter()
         content_parts: list[str] = []
         thinking_parts: list[str] = []
-        done_reason: Optional[str] = None
-        started = perf_counter()
+        native_calls: list[ToolCall] = []
 
         try:
             for chunk in self.provider.chat_stream(
-                messages, model=model, options=options, cancel=token
+                messages, model=model, options=options, tools=tools, cancel=token
             ):
                 if token.is_cancelled():
                     raise LLMCancelledError("پیش از ادامه پاسخ، عملیات لغو شد.")
-                if chunk.done and chunk.done_reason:
-                    done_reason = chunk.done_reason
+                for call in chunk.tool_calls:
+                    native_calls.append(call)
+                if chunk.done and chunk.done_reason == "length":
+                    logger.info("پاسخ به سقف توکن تولید رسید (done_reason=length)")
                 if not chunk.content:
                     continue
                 content_out, thinking_out = splitter.feed(chunk.content)
@@ -179,43 +438,87 @@ class ChatOrchestrator:
         except LLMCancelledError:
             partial = "".join(content_parts).strip()
             if partial:
-                # پاسخ ناتمام را در تاریخچه نگه می‌داریم تا Context گمراه‌کننده نشود
                 self.state.append_assistant(partial, cancelled=True)
-            yield TurnCancelled(partial=partial)
-            return
+            return {"cancelled": TurnCancelled(partial=partial)}
 
         except LLMError as exc:
             logger.warning("نوبت با خطا پایان یافت (%s): %s", type(exc).__name__, exc)
-            yield TurnFailed(error=str(exc), kind=type(exc).__name__)
-            return
+            return {"failed": TurnFailed(error=str(exc), kind=type(exc).__name__)}
+        except Exception as exc:  # noqa: BLE001 - هیچ خطایی نباید از حلقه به UI برسد
+            logger.exception("خطای غیرمنتظره در فراخوانی مدل")
+            return {
+                "failed": TurnFailed(
+                    error=f"خطای داخلی: {exc}", kind="InternalError", recoverable=False
+                )
+            }
 
-        content = "".join(content_parts).strip()
-        thinking = "".join(thinking_parts).strip()
-        if not content and not thinking:
-            yield TurnFailed(
-                error="مدل پاسخی تولید نکرد (خروجی خالی بود). دوباره تلاش کنید.",
-                kind="LLMResponseError",
-            )
-            return
+        return {
+            "content": "".join(content_parts).strip(),
+            "thinking": "".join(thinking_parts).strip(),
+            "tool_calls": native_calls,
+        }
 
-        if done_reason == "length":
-            logger.info("پاسخ به سقف توکن تولید رسید (done_reason=length)")
+    # ------------------------------------------------------------------
+ # ابزارهای داخلی
+    # ------------------------------------------------------------------
 
-        self.state.append_assistant(content, thinking=thinking)
-        yield TurnCompleted(
-            content=content,
-            thinking=thinking,
-            model=model,
-            duration=round(perf_counter() - started, 3),
-        )
+    def _resolve_tool_mode(self, model: str, schemas: list[dict[str, Any]]) -> str:
+        """none (بدون ابزار) | native | fallback — بر اساس قابلیت واقعی مدل."""
+        if not schemas:
+            return "none"
+        try:
+            if self.model_manager.supports_native_tools(model):
+                return "native"
+        except Exception:  # noqa: BLE001 - تصمیم مسیر هرگز نوبت را نباید بکشد
+            logger.debug("بررسی قابلیت ابزار مدل ناموفق؛ fallback انتخاب شد", exc_info=True)
+        return "fallback"
 
-    # --- لغو و کنترل مکالمه ---
+    def _extract_fallback_calls(self, content: str) -> list[ToolCall]:
+        """استخراج فراخوانی JSON از متن پاسخ (مسیر fallback).
+
+        فقط بلوک اول که «شکل درخواست ابزار» را دارد پذیرفته می‌شود؛
+        قالب باید دقیقاً {"tool": ..., "args": {...}} باشد (در پروتکل تعریف شده).
+        """
+        if len(content.strip()) < d.FALLBACK_MIN_JSON_LEN:
+            return []
+        candidates = extract_json_candidates(content)
+        for candidate in candidates:
+            parsed, error = try_parse_json(candidate)
+            if error is not None or not isinstance(parsed, dict):
+                continue
+            if "tool" not in parsed:
+                continue  # JSON اما نه درخواست ابزار → متن عادی است
+            name = parsed.get("tool")
+            args = parsed.get("args", {})
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(args, dict):
+                args = {}
+            return [
+                ToolCall(
+                    name=name.strip(),
+                    args=args,
+                    id=None,
+                    source="fallback",
+                    raw=candidate,
+                )
+            ]
+        return []
+
+    # ------------------------------------------------------------------
+    # لغو و کنترل مکالمه
+    # ------------------------------------------------------------------
 
     def request_cancel(self) -> None:
-        """لغو نوبت در-حال-اجرا: هم توکن ست می‌شود هم socket مدل بسته می‌شود."""
+        """لغو نوبت در-حال-اجرا: توکن ست می‌شود، socket مدل بسته می‌شود و
+        اجرای ابزار در-جریان هم قطع می‌گردد."""
         if self._cancel is None:
             return
         self._cancel.cancel()
+        try:
+            self.tool_registry.request_cancel()
+        except Exception:  # noqa: BLE001 - لغو نباید هیچ‌وقت خطا تولید کند
+            logger.debug("لغو اجرای ابزار با خطا مواجه شد", exc_info=True)
         try:
             closed = self.provider.cancel_active()
             logger.debug("لغو درخواست شد؛ %d جریان بسته شد.", closed)
@@ -230,3 +533,10 @@ class ChatOrchestrator:
     def installed_models(self) -> list[ModelInfo]:
         """فهرست مدل‌ها برای UI؛ خطای اتصال به پیام خالی تبدیل نمی‌شود."""
         return self.model_manager.list_models()
+
+
+def _fallback_pending(tool_name: str, result_text: str) -> ChatMessage:
+    """پیام placeholder نتیجه برای مسیر fallback (به‌عنوان آخرین پیام کاربر)."""
+    message = ChatMessage.user(tool_result_user_message(tool_name, result_text))
+    message.meta = {"tool_name": tool_name, "is_tool_result": True}
+    return message

@@ -13,7 +13,10 @@ from typing import Any, Optional
 
 
 class MockOllamaServer:
-    """سرور ساختگی با حالت‌های قابل تنظیم."""
+    """سرور ساختگی با حالت‌های قابل تنظیم.
+
+    فاز ۲: پشتیبانی /api/show (capabilities) و tool_calls در استریم NDJSON.
+    """
 
     def __init__(
         self,
@@ -22,6 +25,8 @@ class MockOllamaServer:
         version: str = "0.12.0",
         stream_script: Optional[list[tuple[str, float]]] = None,
         fail_mode: Optional[str] = None,
+        tool_calls_script: Optional[list[list[dict[str, Any]]]] = None,
+        capabilities: Optional[dict[str, list[str]]] = None,
     ) -> None:
         self.models = models or [
             {"name": "qwen3:8b", "size": 5_200_000_000, "details": {"parameter_size": "8.2B"}},
@@ -31,6 +36,10 @@ class MockOllamaServer:
         # اسکریپت استریم: لیست (متن قطعه، تأخیر پیش از ارسال ثانیه)
         self.stream_script = stream_script or [("سلام", 0.0), ("! در خدمتم.", 0.0)]
         self.fail_mode = fail_mode  # None | "drop" | "slow" | "error_json" | "bad_ndjson"
+        # فاز ۲: فریم‌های tool_calls برای هر پاسخ شماره n (لیستِ لیست‌ها)
+        self.tool_calls_script = tool_calls_script
+        # فاز ۲: capabilities هر مدل برای /api/show
+        self.capabilities = capabilities or {}
         self.received: list[dict[str, Any]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(self))
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -80,6 +89,15 @@ def _make_handler(server: MockOllamaServer) -> type:
                 return
             server.received.append(body)
 
+            if self.path == "/api/show":
+                model = body.get("model", "")
+                caps = server.capabilities.get(model)
+                payload = {"model": model, "details": {}, "modified_at": "2026-01-01"}
+                if caps is not None:
+                    payload["capabilities"] = caps
+                self._send_json(payload)
+                return
+
             if self.path != "/api/chat":
                 self._send_json({"error": "not found"}, status=404)
                 return
@@ -103,6 +121,16 @@ def _make_handler(server: MockOllamaServer) -> type:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
             self.end_headers()
+            # فاز ۲: اگر درخواست tools دارد و اسکریپت tool_calls تعریف شده،
+            # قطعه پایانی با tool_calls می‌رود (رفتار بومی Ollama)
+            tool_calls_payload = None
+            if server.tool_calls_script is not None and body.get("tools"):
+                chat_index = sum(
+                    1 for item in server.received if item.get("tools")
+                ) - 1
+                script_list = server.tool_calls_script
+                if chat_index < len(script_list):
+                    tool_calls_payload = script_list[chat_index]
             for text, delay in server.stream_script:
                 if delay:
                     time.sleep(delay)
@@ -113,7 +141,7 @@ def _make_handler(server: MockOllamaServer) -> type:
                 }
                 self.wfile.write((json.dumps(line) + "\n").encode("utf-8"))
                 self.wfile.flush()
-            final = {
+            final: dict[str, Any] = {
                 "model": body.get("model", "fake"),
                 "message": {"role": "assistant", "content": ""},
                 "done": True,
@@ -122,6 +150,16 @@ def _make_handler(server: MockOllamaServer) -> type:
                 "prompt_eval_count": 30,
                 "total_duration": 123456789,
             }
+            if tool_calls_payload:
+                frames = []
+                for call in tool_calls_payload:
+                    frame: dict[str, Any] = {
+                        "function": {"name": call["name"], "arguments": call.get("args", {})}
+                    }
+                    if call.get("id"):
+                        frame["id"] = call["id"]
+                    frames.append(frame)
+                final["message"]["tool_calls"] = frames
             self.wfile.write((json.dumps(final) + "\n").encode("utf-8"))
             self.wfile.flush()
 

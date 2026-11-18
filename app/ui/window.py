@@ -45,6 +45,10 @@ QLabel#cardValue { color: #ffffff; font-size: 17px; font-weight: 600; }
 QFrame#bubbleUser { background-color: #2c4a7c; border-radius: 10px; }
 QFrame#bubbleAssistant { background-color: #272e39; border-radius: 10px; }
 QFrame#bubbleError { background-color: #3a2226; border: 1px solid #7f2b2b; border-radius: 10px; }
+QFrame#bubbleTool { background-color: #20303a; border: 1px solid #2d5661; border-radius: 10px; }
+QLabel#toolName { color: #7fd4c4; font-size: 13px; font-weight: 600; }
+QLabel#toolArgs { color: #8f9aab; font-size: 12px; }
+QLabel#toolResult { color: #c7d6e8; font-size: 12px; }
 QLabel#thinkingText { color: #8f9aab; font-style: italic; font-size: 12px; }
 QLabel#bubbleMeta { color: #6d7889; font-size: 11px; }
 QLabel#chatStatus { color: #8f9aab; font-size: 12px; }

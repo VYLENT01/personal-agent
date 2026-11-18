@@ -22,12 +22,15 @@ class ModelManager:
         self._provider = provider
         self._settings = settings
         self._cache: Optional[list[ModelInfo]] = None
+        # کش قابلیت Tool Calling بومی هر مدل (None = هنوز بررسی نشده)
+        self._tools_capability_cache: dict[str, Optional[bool]] = {}
 
     # --- تزریق وابستگی (برای تغییر تنظیمات در زمان اجرا) ---
 
     def set_provider(self, provider: BaseLLMClient) -> None:
         self._provider = provider
         self._cache = None
+        self._tools_capability_cache = {}
 
     def set_settings(self, settings: Settings) -> None:
         self._settings = settings
@@ -62,6 +65,29 @@ class ModelManager:
     def active_model(self) -> str:
         """مدل فعال از تنظیمات؛ هیچ فراخوانی شبکه‌ای ندارد (همیشه سریع و امن)."""
         return self._settings.active_model
+
+    def supports_native_tools(self, model: Optional[str] = None, *, refresh: bool = False) -> bool:
+        """آیا مدل قابلیت Tool Calling بومی دارد؟ (کش‌شده، قطع سرویس → False).
+
+        تصمیم مسیر native (پارامتر tools) بر عهده همین پاسخ است؛
+        برای مدل بدون قابلیت، orchestrator به پروتکل fallback می‌رود.
+        """
+        name = (model or self._settings.active_model).strip()
+        if not name:
+            return False
+        cached = self._tools_capability_cache.get(name)
+        if cached is not None and not refresh:
+            return cached
+        try:
+            result = bool(self._provider.supports_native_tools(name))
+        except LLMError:
+            result = False  # قطع سرویس نباید مسیر ابزار را قفل کند؛ fallback می‌ماند
+        self._tools_capability_cache[name] = result
+        if result:
+            logger.info("مدل «%s» از Tool Calling بومی پشتیبانی می‌کند", name)
+        else:
+            logger.info("مدل «%s» قابلیت بومی ندارد؛ مسیر fallback فعال می‌شود", name)
+        return result
 
     def set_active_model(self, name: str) -> None:
         """انتخاب مدل فعال؛ نام نامعتبر رد می‌شود و فهرست نصب‌شده‌ها ارائه می‌گردد."""

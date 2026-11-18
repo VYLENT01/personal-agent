@@ -125,9 +125,16 @@ class DashboardPage(QWidget):
         root.addLayout(grid)
         root.addStretch(1)
 
-        # مقدار ثابت این نسخه
-        self.card_tasks.set_value("۰ (فاز ۱)")
-        self.card_tools.set_value("ابزارها در فاز ۲ فعال می‌شوند — Registry آماده است")
+        # مقدار این نسخه — فهرست واقعی ابزارهای ثبت‌شده
+        self.card_tasks.set_value("۰ (Planner در فاز ۴)")
+        names = context.tool_registry.tool_names()
+        if names:
+            self.card_tools.set_value(
+                f"{len(names)} ابزار فقط-خواندنی فعال:\n"
+                + "\n".join(f"• {name}" for name in names)
+            )
+        else:
+            self.card_tools.set_value("هیچ ابزاری ثبت نشده است")
 
         # تازه‌سازی دوره‌ای
         self._timer = QTimer(self)

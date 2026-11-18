@@ -329,4 +329,164 @@ class TestJsonExtraction:
         assert "JSON" in message
 
 
+# ===========================================================================
+# فاز ۲ — Tool Calling بومی روی سرور mock
+# ===========================================================================
+
+class TestNativeToolsProtocol:
+    """بخش سوم: tools در /api/chat و tool_calls در قطعه پایانی NDJSON."""
+
+    def test_tools_sent_in_payload(self) -> None:
+        server = MockOllamaServer()
+        try:
+            client = OllamaClient(server.url)
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "system.get_memory_usage",
+                        "description": "…",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+            list(client.chat_stream(_messages(), model="qwen3:8b", tools=tools))
+            body = server.received[-1]
+            assert body["tools"] == tools  # فریم wire دست‌نخورده
+            assert body["stream"] is True
+        finally:
+            server.stop()
+
+    def test_no_tools_key_without_tools(self) -> None:
+        server = MockOllamaServer()
+        try:
+            client = OllamaClient(server.url)
+            list(client.chat_stream(_messages(), model="qwen3:8b"))
+            assert "tools" not in server.received[-1]
+        finally:
+            server.stop()
+
+    def test_stream_delivers_tool_calls_on_final_chunk(self) -> None:
+        server = MockOllamaServer(
+            tool_calls_script=[
+                [{"name": "system.get_memory_usage", "args": {}, "id": "call_9"}]
+            ]
+        )
+        try:
+            client = OllamaClient(server.url)
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "system.get_memory_usage",
+                        "description": "…",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+            chunks = list(
+                client.chat_stream(_messages(), model="qwen3:8b", tools=tools)
+            )
+            final = chunks[-1]
+            assert final.done is True
+            assert len(final.tool_calls) == 1
+            call = final.tool_calls[0]
+            assert call.name == "system.get_memory_usage"
+            assert call.args == {}
+            assert call.id == "call_9"
+            assert call.source == "native"
+            # متن پاسخ هم مثل قبل استریم شد
+            assert "".join(c.content for c in chunks[:-1]) == "سلام! در خدمتم."
+        finally:
+            server.stop()
+
+    def test_chat_non_stream_parses_tool_calls(self) -> None:
+        # chat() غیر-استریم هم tool_calls را برمی‌گرداند (از parse_tool_calls)
+        from app.llm.ollama_client import parse_tool_calls
+
+        frames = [
+            {"function": {"name": "system.get_disk_usage", "arguments": {"path": "C:"}}}
+        ]
+        calls = parse_tool_calls(frames)
+        assert calls[0].name == "system.get_disk_usage"
+        assert calls[0].args == {"path": "C:"}
+
+    def test_tool_messages_wire_format(self) -> None:
+        # پیام role=tool و پیام assistant با tool_calls در to_api درست serialize می‌شوند
+        from app.llm.base import ChatMessage, ToolCall
+
+        assistant = ChatMessage.assistant(
+            "", tool_calls=[ToolCall(name="a.b", args={"x": 1}, id="c1")]
+        )
+        frame = assistant.to_api()
+        assert frame["tool_calls"][0]["function"]["name"] == "a.b"
+        assert frame["tool_calls"][0]["function"]["arguments"] == {"x": 1}
+        assert frame["tool_calls"][0]["id"] == "c1"
+
+        tool = ChatMessage.tool("نتیجه", tool_call_id="c1")
+        tool.meta = {"tool_name": "a.b"}
+        tool_frame = tool.to_api()
+        assert tool_frame["role"] == "tool"
+        assert tool_frame["tool_name"] == "a.b"
+        assert tool_frame["tool_call_id"] == "c1"
+
+
+class TestShowModelCapabilities:
+    """تشخیص قابلیت واقعی مدل از /api/show."""
+
+    def test_supports_native_tools_true(self) -> None:
+        server = MockOllamaServer(capabilities={"qwen3:8b": ["completion", "tools"]})
+        try:
+            client = OllamaClient(server.url)
+            assert client.supports_native_tools("qwen3:8b") is True
+        finally:
+            server.stop()
+
+    def test_supports_native_tools_false(self) -> None:
+        server = MockOllamaServer(capabilities={"gemma3:4b": ["completion"]})
+        try:
+            client = OllamaClient(server.url)
+            assert client.supports_native_tools("gemma3:4b") is False
+        finally:
+            server.stop()
+
+    def test_no_capabilities_key_means_false(self) -> None:
+        # Ollama قدیمی / بدون capabilities → False (fallback می‌ماند)
+        server = MockOllamaServer()
+        try:
+            client = OllamaClient(server.url)
+            assert client.supports_native_tools("qwen3:8b") is False
+        finally:
+            server.stop()
+
+    def test_show_model_connection_failure_returns_minimal(self) -> None:
+        # قطع سرویس → ModelInfo حداقلی، بدون exception
+        client = OllamaClient("http://127.0.0.1:1", connect_timeout=1.0, read_timeout=2.0)
+        info = client.show_model("qwen3:8b")
+        assert info.name == "qwen3:8b"
+        assert info.capabilities is None
+        client.close()
+
+
+class TestModelManagerToolsCapability:
+    def test_supports_tools_cached(self) -> None:
+        from app.llm.base import ModelInfo
+        from tests.fakes import FakeLLMClient
+
+        provider = FakeLLMClient(native_tools=True)
+        settings = Settings()
+        manager = ModelManager(provider, settings)
+        assert manager.supports_native_tools("qwen3:8b") is True
+        assert provider.show_calls.count("qwen3:8b") == 1
+        manager.supports_native_tools("qwen3:8b")  # کش — فراخوانی مجدد شبکه نیست
+        assert provider.show_calls.count("qwen3:8b") == 1
+
+    def test_supports_tools_default_false_without_capability(self) -> None:
+        from tests.fakes import FakeLLMClient
+
+        provider = FakeLLMClient(native_tools=False)
+        manager = ModelManager(provider, Settings())
+        assert manager.supports_native_tools("qwen3:8b") is False
+
+
 import json  # noqa: E402 - مورد نیاز تست ذخیره تنظیمات

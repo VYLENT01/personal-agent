@@ -7,7 +7,7 @@ from __future__ import annotations
 
 APP_NAME = "Personal Agent"
 APP_NAME_FA = "دستیار هوشمند شخصی"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 ORG_NAME = "PersonalAgent"
 
 # --- Ollama / LLM ---
@@ -45,8 +45,26 @@ ENV_FILE_NAME = ".env"
 
 # --- Agent ---
 # سقف تکرار حلقه agent در هر درخواست؛ جلوگیری از حلقه بی‌نهایت.
-# در فاز ۱ فقط یک پاسخ تولید می‌شود؛ از فاز ۲ (tool calling) به بعد کاربرد عملی دارد.
 MAX_AGENT_ITERATIONS = 8
+
+# --- Tool Calling (فاز ۲) ---
+# سقف تعداد فراخوانی ابزار در یک نوبت (چند Tool Call مجاز، حلقه بی‌نهایت ممنوع)
+MAX_TOOL_CALLS_PER_TURN = 5
+# حداکثر طول متن نتیجه ابزار که به مدل فرستاده می‌شود (کاراکتر) — محافظ Context
+TOOL_RESULT_MAX_CHARS = 4000
+# زمان اجرای هر ابزار (ثانیه)؛ فراتر از آن ToolTimeoutError
+TOOL_TIMEOUT_SECONDS = 10.0
+# تأخیر پیش از ثبت رویداد شروع ابزار در UI (ثانیه) — فقط برای شفافیت لاگ
+TOOL_LOG_DELAY = 0.0
+# سقف تعداد ابزار در پرامپت مدل؛ بیش از این، ابزارها برش می‌خورند (محافظت از num_ctx)
+MAX_TOOLS_IN_PROMPT = 24
+# حداقل اندازه تفکیک برای اعتبار پاسخ JSON در مسیر fallback
+FALLBACK_MIN_JSON_LEN = 6
+
+# --- Permission levels (فاز ۲؛ اجرای L2/L3 در فاز ۵ کامل می‌شود) ---
+PERMISSION_L1 = 1  # فقط-خواندنی: اجرای خودکار
+PERMISSION_L2 = 2  # نوشتن/تغییر: در این فاز ابزاری ثبت نمی‌شود
+PERMISSION_L3 = 3  # حساس/حذف/ترمینال: در این فاز ابزاری ثبت نمی‌شود
 
 # --- مقادیر مجاز ---
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
@@ -58,3 +76,8 @@ ENV_KEY_OLLAMA_URL = ENV_PREFIX + "OLLAMA_URL"
 ENV_KEY_MODEL = ENV_PREFIX + "MODEL"
 ENV_KEY_LANGUAGE = ENV_PREFIX + "LANGUAGE"
 ENV_KEY_LOG_LEVEL = ENV_PREFIX + "LOG_LEVEL"
+
+# --- متغیرهای محیطی تست Integration واقعی ---
+# اگر ست شده باشد، تست‌های integration واقعی Ollama اجرا می‌شوند:
+# PERSONAL_AGENT_INTEGRATION_MODEL=qwen3:8b pytest tests/test_integration_ollama.py
+ENV_KEY_INTEGRATION_MODEL = ENV_PREFIX + "INTEGRATION_MODEL"

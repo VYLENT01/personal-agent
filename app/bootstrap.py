@@ -18,6 +18,7 @@ from app.config.settings import Settings
 from app.llm.base import BaseLLMClient
 from app.llm.model_manager import ModelManager
 from app.llm.ollama_client import OllamaClient
+from app.tools.registry import ToolRegistry, build_default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class AppContext:
     provider: BaseLLMClient
     model_manager: ModelManager
     orchestrator: ChatOrchestrator
+    tool_registry: ToolRegistry
 
     def apply_settings(self, new_settings: Settings) -> None:
         """اعمال تنظیمات جدید در زمان اجرا + ذخیره + بازسازی اجزای وابسته."""
@@ -132,6 +134,7 @@ def build_app_context(
     *,
     settings: Optional[Settings] = None,
     provider: Optional[BaseLLMClient] = None,
+    tool_registry: Optional[ToolRegistry] = None,
     configure_log: bool = True,
 ) -> AppContext:
     """ساخت و سیم‌کشی همه اجزای برنامه."""
@@ -161,7 +164,8 @@ def build_app_context(
         settings.read_timeout,
     )
     model_manager = ModelManager(provider, settings)
-    orchestrator = ChatOrchestrator(provider, model_manager, settings)
+    tool_registry = tool_registry or build_default_registry()
+    orchestrator = ChatOrchestrator(provider, model_manager, settings, tool_registry)
 
     context = AppContext(
         root=root,
@@ -172,11 +176,13 @@ def build_app_context(
         provider=provider,
         model_manager=model_manager,
         orchestrator=orchestrator,
+        tool_registry=tool_registry,
     )
     logger.info(
-        "برنامه راه‌اندازی شد (نسخه %s) — Ollama: %s | مدل فعال: %s",
+        "برنامه راه‌اندازی شد (نسخه %s) — Ollama: %s | مدل فعال: %s | ابزارها: %s",
         d.APP_VERSION,
         settings.ollama_base_url,
         settings.active_model,
+        "، ".join(tool_registry.tool_names()) or "هیچ",
     )
     return context

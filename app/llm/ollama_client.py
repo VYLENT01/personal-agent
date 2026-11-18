@@ -3,7 +3,8 @@
 از HTTP API رسمی Ollama استفاده می‌کند (بدون وابستگی به کتابخانه خاص):
 - GET  /api/version  → نسخه سرویس
 - GET  /api/tags     → مدل‌های نصب‌شده
-- POST /api/chat     → گفت‌وگو (استریم NDJSON یا کامل)
+- POST /api/show     → جزئیات و capabilities مدل (تشخیص Tool Calling بومی)
+- POST /api/chat     → گفت‌وگو (استریم NDJSON یا کامل؛ پارامتر tools)
 
 همه خطاها به خطاهای استاندارد app.llm.base نگاشت می‌شوند تا
 هسته ایجنت هیچ چیزی درباره نوع بک‌اند نداند.
@@ -28,6 +29,7 @@ from app.llm.base import (
     LLMTimeoutError,
     ModelInfo,
     StreamChunk,
+    ToolCall,
 )
 from app.llm.response_parser import extract_content
 
@@ -146,17 +148,54 @@ class OllamaClient(BaseLLMClient):
         models.sort(key=lambda m: m.name.lower())
         return models
 
+    def show_model(self, model: str) -> ModelInfo:
+        """جزئیات مدل از POST /api/show (شامل capabilities فاز ۲).
+
+        اگر مدل در دسترس نباشد، ModelInfo حداقلی برمی‌گردد (قطع سرویس نباید
+        تصمیم fallback را بکشد؛ orchestrator با cache مدل دروغگو کار نمی‌کند).
+        """
+        try:
+            response = self._send("POST", "/api/show", json_body={"model": model}, timeout=(2.0, 8.0))
+            with response:
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise LLMResponseError("پاسخ /api/show معتبر نبود.") from exc
+        except LLMError as exc:
+            logger.debug("show_model ناموفق (%s): %s", model, exc)
+            return ModelInfo(name=model, capabilities=None)
+        details = data.get("details") or {}
+        capabilities = data.get("capabilities")
+        if not isinstance(capabilities, list):
+            capabilities = None
+        return ModelInfo(
+            name=model,
+            size_bytes=None,
+            modified_at=data.get("modified_at"),
+            digest=data.get("digest"),
+            details=details if isinstance(details, dict) else {},
+            capabilities=capabilities,
+        )
+
+    def supports_native_tools(self, model: str) -> bool:
+        """تشخیص قابلیت Tool Calling بومی از capabilities مدل."""
+        info = self.show_model(model)
+        if info.capabilities is None:
+            return False
+        return any("tool" in str(cap) for cap in info.capabilities)
+
     def chat(
         self,
         messages: Sequence[ChatMessage],
         model: Optional[str] = None,
         *,
         options: Optional[Mapping[str, Any]] = None,
+        tools: Optional[Sequence[Mapping[str, Any]]] = None,
         cancel: Optional[CancelToken] = None,
     ) -> LLMResponse:
         if cancel is not None and cancel.is_cancelled():
             raise LLMError("درخواست پیش از ارسال لغو شد.")
-        payload = self._payload(messages, model, options)
+        payload = self._payload(messages, model, options, tools)
         payload["stream"] = False
         response = self._send("POST", "/api/chat", json_body=payload)
         with response:
@@ -172,6 +211,7 @@ class OllamaClient(BaseLLMClient):
         return LLMResponse(
             content=content,
             thinking=thinking,
+            tool_calls=parse_tool_calls(message.get("tool_calls") or []),
             model=data.get("model") or model,
             done_reason=data.get("done_reason"),
             prompt_eval_count=data.get("prompt_eval_count"),
@@ -186,9 +226,10 @@ class OllamaClient(BaseLLMClient):
         model: Optional[str] = None,
         *,
         options: Optional[Mapping[str, Any]] = None,
+        tools: Optional[Sequence[Mapping[str, Any]]] = None,
         cancel: Optional[CancelToken] = None,
     ) -> Iterator[StreamChunk]:
-        payload = self._payload(messages, model, options)
+        payload = self._payload(messages, model, options, tools)
         payload["stream"] = True
         response = self._send("POST", "/api/chat", json_body=payload, stream=True)
         self._register(response)
@@ -244,17 +285,27 @@ class OllamaClient(BaseLLMClient):
         messages: Sequence[ChatMessage],
         model: Optional[str],
         options: Optional[Mapping[str, Any]],
+        tools: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "model": model,
             "messages": [message.to_api() for message in messages],
             "options": dict(options or {}),
         }
+        if tools:
+            # ابزارها فقط وقتی واقعاً هست (Ollama بدون tools رفتار فاز ۱ را دارد)
+            payload["tools"] = [dict(tool) for tool in tools]
+        return payload
 
     def _read_stream(
         self, response: requests.Response, cancel: Optional[CancelToken]
     ) -> Iterator[StreamChunk]:
         try:
+            # انباشت قطعه‌های tool_calls: Ollama در استریم، هر ToolCall را
+            # در «قطعه پایانی» (done) یکجا می‌فرستد؛ اما برای استحکام،
+            # قطعه‌های میانی هم انباشته می‌شوند (id/name/arguments جزء‌جزء).
+            pending_calls: dict[str, dict[str, Any]] = {}
+
             for raw_line in response.iter_lines(chunk_size=1):
                 if cancel is not None and cancel.is_cancelled():
                     raise LLMError("__CANCELLED__")
@@ -270,10 +321,16 @@ class OllamaClient(BaseLLMClient):
                 if obj.get("error"):
                     raise LLMResponseError(f"خطای Ollama: {obj['error']}")
                 message = obj.get("message") or {}
+
+                # انباشت tool_calls قطعه‌ای؛ در قطعه پایانی یکجا بسته می‌شوند
+                if message.get("tool_calls"):
+                    _accumulate_batch(pending_calls, message["tool_calls"])
+                is_done = bool(obj.get("done", False))
                 chunk = StreamChunk(
                     content=message.get("content") or "",
-                    done=bool(obj.get("done", False)),
+                    done=is_done,
                     done_reason=obj.get("done_reason"),
+                    tool_calls=[] if not is_done else _finalize_pending(pending_calls),
                     meta={key: obj[key] for key in _STATS_KEYS if key in obj},
                 )
                 yield chunk
@@ -324,3 +381,92 @@ class OllamaClient(BaseLLMClient):
     def _unregister(self, response: requests.Response) -> None:
         with self._lock:
             self._active_streams.discard(response)
+
+
+# ---------------------------------------------------------------------------
+# انباشت و پارس ToolCall های بومی Ollama
+# ---------------------------------------------------------------------------
+
+def parse_tool_calls(frames: Sequence[Any]) -> list[ToolCall]:
+    """تبدیل فریم‌های خام message.tool_calls به ToolCall های neutral.
+
+    هر قالبی را می‌پذیرد که Ollama/قالب OpenAI-compatible تولید کند:
+    {"function": {"name", "arguments"}} — arguments ممکن است رشته JSON یا dict باشد.
+    فریم نامعتبر (بدون نام تابع) بی‌صدا رد می‌شود و در لاگ ثبت می‌گردد.
+    """
+    pending: dict[str, dict[str, Any]] = {}
+    for frame in frames:
+        _accumulate_tool_call(pending, frame)
+    return _finalize_pending(pending)
+
+
+def _accumulate_tool_call(
+    pending: dict[str, dict[str, Any]], frame: Any
+) -> None:
+    """انباشت یک فریم tool_call داخل جدول pending.
+
+    در استریم، Ollama قطعه‌های جزئی می‌فرستد؛ با id/name/arguments ترتیبی
+    انباشته می‌شوند تا در قطعه پایانی کامل شوند. خروجی ندارد؛ خواننده
+    استریم بعد از قطعه پایانی با _finalize_pending همه را یکجا می‌بندد.
+    """
+    if not isinstance(frame, dict):
+        return
+    function = frame.get("function") or {}
+    name = function.get("name") or frame.get("name")
+    call_id = frame.get("id")
+    arguments = function.get("arguments", frame.get("arguments"))
+
+    if not name and not call_id:
+        logger.debug("فریم tool_call بدون نام تابع رد شد: %r", frame)
+        return
+
+    key = str(call_id or name or len(pending))
+
+    if key not in pending:
+        pending[key] = {"id": call_id, "name": name, "args_text": "", "args_obj": None}
+    state = pending[key]
+    if call_id:
+        state["id"] = call_id
+    if name:
+        state["name"] = name
+
+    # arguments ممکن است dict، رشته JSON کامل یا «ادامهٔ» رشته قبلی باشد
+    if isinstance(arguments, dict):
+        state["args_obj"] = arguments
+        state["args_text"] = json.dumps(arguments, ensure_ascii=False)
+    elif isinstance(arguments, str):
+        state["args_text"] = state.get("args_text", "") + arguments
+
+
+def _accumulate_batch(
+    pending: dict[str, dict[str, Any]], frames: Sequence[Any]
+) -> None:
+    """انباشت یک دسته فریم tool_call (از یک پیام)."""
+    for frame in frames:
+        _accumulate_tool_call(pending, frame)
+
+
+def _finalize_pending(pending: dict[str, dict[str, Any]]) -> list[ToolCall]:
+    """بستن همه ToolCallهای انباشته؛ ناتمام‌ها با args پیش‌فرض بسته می‌شوند."""
+    calls: list[ToolCall] = []
+    for state in pending.values():
+        args: dict[str, Any] = {}
+        args_obj = state.get("args_obj")
+        if isinstance(args_obj, dict):
+            args = args_obj
+        elif state.get("args_text"):
+            text = str(state["args_text"]).strip()
+            if text:
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except json.JSONDecodeError:
+                    logger.debug(
+                        "arguments ناتمام قابل پارس نبود؛ args خالی فرستاده شد: %r",
+                        text[:120],
+                    )
+        calls.append(
+            ToolCall(name=str(state.get("name")), args=args, id=state.get("id"))
+        )
+    return calls

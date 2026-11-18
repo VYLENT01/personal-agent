@@ -11,9 +11,12 @@
 ## ۲. اجرای تست‌ها
 
 ```bash
-python -m pytest tests -q           # کل مجموعه (سرور mock Ollama خودکار)
-python -m pytest tests/test_llm.py -q
+python -m pytest tests -q           # کل مجموعه (سرور mock Ollama خودکار) → ۱۲۸ passed
+python -m pytest tests/test_tools.py -q
 QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # تست UI بدون نمایشگر
+
+# integration با Ollama واقعی (اختیاری):
+PERSONAL_AGENT_INTEGRATION_MODEL=qwen3:8b python -m pytest tests/test_integration_ollama.py -v
 ```
 
 در محیط بدون نمایشگر لینوکسی، ممکن است `libEGL` لازم باشد (از پکیج `libegl1`).
@@ -22,11 +25,13 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # تست UI ب�
 
 | فایل | پوشش |
 |---|---|
-| `test_llm.py` | پروتکل Ollama (mock: استریم NDJSON/timeout/خطا/لغو)، ModelManager، parser |
-| `test_agent.py` | Orchestrator: رویدادها، thinking، پنجره Context، لغو، خطاها |
+| `test_tools.py` | قرارداد Tool/Pydantic، Registry (ثبت/تکراری/رد ناشناخته/غیرفعال/L3)، timeout واقعی، سه ابزار psutil |
+| `test_llm.py` | پروتکل Ollama (mock: استریم NDJSON/timeout/خطا/لغو)، **native tools + /api/show capabilities**، ModelManager، parser |
+| `test_agent.py` | حلقه کامل Agent: **چرخه native و fallback**، ارسال نتیجه به مدل، سقف‌ها/حلقه بی‌نهایت، لغو حین ابزار، پیام‌های state |
 | `test_config.py` | Settings: پیش‌فرض/env/sanitize/ذخیره اتمیک + .env |
-| `test_ui.py` | پنجره، چت استریم، خطا بدون کرش، گفت‌وگوی جدید (offscreen) |
-| `test_tools.py / test_security.py / test_memory.py` | قرارداد فازهای ۲/۵/۴ — با پیاده‌شان کامل می‌شوند |
+| `test_ui.py` | پنجره، چت استریم، خطا بدون کرش، **حباب ابزار موفق/خطا** (offscreen) |
+| `test_memory.py / test_security.py` | قرارداد فازهای ۴/۵ — با پیاده‌شان کامل می‌شوند |
+| `test_integration_ollama.py` | **integration واقعی**؛ بدون env skip می‌شود |
 
 ## ۴. افزودن Provider جدید (بند ۷)
 
@@ -36,20 +41,20 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # تست UI ب�
 
 هسته ایجنت هیچ تغییری نمی‌خواهد — فقط قرارداد.
 
-## ۵. افزودن ابزار (فاز ۲)
+## ۵. افزودن ابزار (فاز ۲ به بعد)
 
-۱. کلاس `Tool` در `app/tools/<گروه>.py` با schema و سطح دسترسی (راهنمای کامل: docs/tools.md).
-۲. ثبت در Registry + افزودن به پرامپت قابلیت‌ها (`build_system_prompt`).
-۳. Orchestrator بین ToolCall و پاسخ متنی تصمیم می‌گیرد؛ رویداد `ToolCallRequested` اضافه خواهد شد.
-۴. تست موفق + رد نامعتبر + بدون کرش (Test 6).
+۱. کلاس `Tool` در `app/tools/<گروه>.py` با `input_model` (Pydantic) و `permission_level` (راهنمای کامل: docs/tools.md).
+۲. ثبت در `ToolRegistry.register_tool` (bootstrap یا گروه ابزار جدید در `create_default_tools`).
+۳. پرامپت قابلیت‌ها خودکار از Registry ساخته می‌شود (`capabilities_prompt`)؛ مسیر native/fallback خودکار انتخاب می‌شود.
+۴. سه تست الزامی: موفق + رد ورودی نامعتبر + بدون کرش.
 
 ## ۶. وضعیت فازها و برنامه
 
 | فاز | خروجی | وضعیت |
 |---|---|---|
-| ۱ — Local AI Core | چت‌بات محلی: Ollama، استریم، thinking جدا، لغو، مدیریت خطا، UI کامل | ✅ کامل (۶۹ تست سبز) |
-| ۲ — Tool Calling | Registry، schema validation، چرخه ابزار | ⏭ بعدی |
-| ۳ — Windows Integration | filesystem/system/terminal/applications/development | ⏭ |
+| ۱ — Local AI Core | چت‌بات محلی: Ollama، استریم، thinking جدا، لغو، مدیریت خطا، UI کامل | ✅ کامل |
+| ۲ — Tool Calling | Registry، Pydantic schema، چرخه ۱۰مرحله‌ای، native+fallback، UI ابزار | ✅ کامل (۱۲۸ تست سبز) |
+| ۳ — Windows Integration | filesystem/system/terminal/applications/development | ⏭ بعدی |
 | ۴ — Memory & Planning | SQLite + Qdrant اختیاری، Planner/Executor | ⏭ |
 | ۵ — Security & Autonomy | Permission/Approval/Audit/Sandbox | ⏭ |
 | ۶ — Product | صوت (faster-whisper/Piper)، بسته‌بندی | ⏭ |
@@ -62,4 +67,12 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ui.py -q   # تست UI ب�
 
 **محدودیت شناخته‌شده در سندبox توسعه**: Ollama روی این محیط لینوکسی نصب نیست؛ رفتار پروتکلی با mock تست شد. تست END-TO-END با مدل واقعی (qwen3:8b) باید روی ماشین هدف Windows انجام شود (check_environment خروجی ۲ می‌دهد تا کاربر را راهنمایی کند).
 
-**مسیر صوت/Qdrant** طبق مشخصات در فاز ۶/۴ اضافه می‌شوند.
+## ۸. گزارش فاز ۲ — Tool Calling
+
+**فایل‌های جدید**: `app/tools/{__init__,base,registry,system_tools}.py` + `tests/{test_tools,test_integration_ollama}.py`.
+
+**فایل‌های تغییرکرده**: `llm/base.py` (ToolCall/پیام tool/tools param/show_model)، `llm/ollama_client.py` (ارسال tools + انباشت استریمی tool_calls + /api/show)، `llm/model_manager.py` (کش قابلیت)، `agent/orchestrator.py` (حلقه ۱۰مرحله‌ای + دو مسیر + لغو سه‌لایه)، `agent/prompts.py` (پروتکل fallback + هدایت native)، `agent/state.py` (پیام‌های ابزار)، `bootstrap.py` (Registry)، `ui/{chat,window,dashboard}.py` (حباب ابزار/تم/داشبورد)، defaults/pyproject/requirements (نسخه + pydantic + سقف‌ها)، mock_ollama.py + fakes.py (پشتیبانی tools/capabilities/مرحله‌ای)، تست‌های agent/llm/ui به‌روز.
+
+**تست‌ها**: ۱۲۸ passed + ۲ skipped (integration عمدی تا تنظیم env) + smoke بوت با ۳ ابزار ثبت‌شده (exit 0).
+
+**باگ‌های یافت‌و‌رفع‌شده حین توسعه**: (۱) `ThreadPoolExecutor` با context-manager تا اتمام thread بلاک می‌شد → timeout بی‌اثار؛ (۲) لغو فقط socket مدل را می‌بست، اجرای ابزار ادامه می‌یافت → توکن مشترک Registry؛ (۳) باگ باقی‌مانده فاز ۱: پیام کاربر دوبار به مدل می‌رفت (پنجره Context + append جداگانه).

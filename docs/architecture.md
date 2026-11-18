@@ -1,6 +1,6 @@
 # معماری نرم‌افزار — Personal Agent
 
-نسخه سند: 1.0 (هم‌راستا با فاز ۱ — Local AI Core)
+نسخه سند: 1.1 (هم‌راستا با فاز ۲ — Tool Calling؛ بخش‌های ۱–۷ فاز ۱ همچنان معتبرند)
 
 ## ۱. هدف معماری
 
@@ -95,12 +95,12 @@ User Request
 | مسیر | فاز | وضعیت |
 |---|---|---|
 | `app/main.py, bootstrap.py, ui/*, llm/*, config/*, agent/{orchestrator,state,prompts}` | ۱ | ✅ پیاده و تست‌شده |
-| `app/tools/*` (registry + ۶ فایل ابزار) | ۲–۳ | برنامه‌ریزی‌شده |
+| `app/tools/{base,registry,system_tools}.py` + حلقه Tool Calling در orchestrator + UI ابزار | ۲ | ✅ پیاده و تست‌شده (۱۲۸ تست) |
+| `app/tools/{filesystem,terminal,applications,development,browser}.py` | ۳ | برنامه‌ریزی‌شده |
 | `app/memory/*`, `agent/{planner,executor,task_manager}` | ۴ | برنامه‌ریزی‌شده |
 | `app/security/*`, `ui/{tool_activity,approval_dialog}` | ۵ | برنامه‌ریزی‌شده |
-| `app/integrations/*` | ۳ | برنامه‌ریزی‌شده |
 
-فایل‌های فازهای بعدی عمداً **ایجاد نشده‌اند** (نه پوشه خالی، نه فایل stub) تا «کد واقعی یا هیچ» رعایت شود.
+فایل‌های فازهای ۳–۵ عمداً **ایجاد نشده‌اند** (نه پوشه خالی، نه فایل stub) تا «کد واقعی یا هیچ» رعایت شود.
 
 ## ۸. تصمیم‌های کلیدی طراحی
 
@@ -109,3 +109,9 @@ User Request
 3. **StreamThinkSplitter**: تفکیک زنده thinking (تگ think) با مدیریت مرز تگ ناقص بین دو قطعه؛ مدل‌های Qwen3 بدون آن، تفکر خام را داخل پاسخ نشان می‌دهند.
 4. **مدل هرگز hardcode نیست**: `ModelManager.suggest_default()` از نصب‌شده‌های واقعی انتخاب می‌کند (اولویت: مدل فعال → فهرست fallback مشخصات → اولین مدل موجود).
 5. **Settings immutable-style**: هر تغییر `copy_with` + `save` اتمیک (tmp + replace)؛ `_path` به ارث می‌رسد.
+6. **دو مسیر Tool Calling (فاز ۲)**:
+   - **native**: تشخیص قابلیت واقعی از `POST /api/show` (`capabilities`) → پارامتر `tools` به `/api/chat` و `message.tool_calls` در قطعه پایانی استریم؛ انباشت قطعه‌ای با کلید id/name.
+   - **fallback**: مدل بدون قابلیت → پروتکل JSON صریح (`{"tool","args"}`) در پیام سیستم؛ استخراج از متن پاسخ با `extract_json_candidates` (تست‌شده فاز ۱)؛ نتیجه به‌عنوان پیام کاربر با پیشوند `[نتیجه ابزار]`.
+   - تصمیم مسیر در `_resolve_tool_mode`؛ Agent Core به هیچ فرمت اختصاصی مدل وابسته نیست (قرارداد `BaseLLMClient`/`ToolCall` neutral).
+7. **لغو در سه لایه (فاز ۲)**: توکن CancelToken مشترک بین LLM و Registry؛ `cancel_active` برای socket؛ حلقه انتظارِ قابل‌قطع در `_run_with_timeout` — لغو حین اجرای ابزار در <۰.۱s.
+8. **اجرای ابزار با timeout واقعی**: `ThreadPoolExecutor` بدون context-manager (`shutdown(wait=False)`) — چون `with` تا اتمام thread بلاک می‌شود و timeout را بی‌اثار می‌کند (باگ یافت‌شده و تست‌شده).
